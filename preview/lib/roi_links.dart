@@ -441,6 +441,8 @@ class AssignmentCandidate {
     required this.assetId,
     required this.assetName,
     required this.reason,
+    this.confidence = 1,
+    this.label = '',
   });
 
   final String status;
@@ -448,8 +450,50 @@ class AssignmentCandidate {
   final String assetId;
   final String assetName;
   final String reason;
+  final double confidence;
+  final String label;
 
   String get key => '$frameId|$assetId';
+
+  String get mark => label.isEmpty ? status : label;
+
+  bool get canAcceptAll => status == 'ready';
+}
+
+/// Python の `suggest` が返す1行を候補にする。割当はしない。
+List<AssignmentCandidate> parseSuggestedAssignments(String stdout) {
+  final found = <AssignmentCandidate>[];
+  for (final line in stdout.split(RegExp(r'\r?\n'))) {
+    final parts = line.split('\t');
+    if (parts.length < 7) {
+      continue;
+    }
+    if (parts[0] != 'ready' && parts[0] != 'confirm' && parts[0] != 'conflict') {
+      continue;
+    }
+    final confidence = double.tryParse(parts[4]);
+    if (confidence == null) {
+      continue;
+    }
+    found.add(
+      AssignmentCandidate(
+        status: parts[0],
+        frameId: parts[1],
+        assetId: parts[2],
+        assetName: parts[3],
+        confidence: confidence,
+        label: parts[5],
+        reason: parts.sublist(6).join('\t'),
+      ),
+    );
+  }
+  return found;
+}
+
+String assignmentCandidateLabel(AssignmentCandidate candidate, {String? frameName}) {
+  final percent = (candidate.confidence * 100).round();
+  final target = frameName == null || frameName.isEmpty ? candidate.frameId : frameName;
+  return '${candidate.mark} $percent%: ${candidate.assetName} → $target（${candidate.reason}）';
 }
 
 /// 空の通常表示の枠と、未使用の素材の候補。割り当てはしない。
@@ -549,6 +593,12 @@ AssignmentCandidate _candidate(
     assetId: asset['id'] as String,
     assetName: asset['displayName'] as String,
     reason: reason,
+    confidence: status == 'ready' ? 1 : 0.5,
+    label: status == 'conflict'
+        ? '競合'
+        : status == 'ready'
+        ? '確定候補'
+        : '確認推奨',
   );
 }
 

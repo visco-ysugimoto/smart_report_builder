@@ -18,6 +18,7 @@ from smart_report_builder.layout import layout_slide
 from smart_report_builder.models import (
     Asset,
     Binding,
+    FitMode,
     GridNode,
     ImageFrameNode,
     Inheritance,
@@ -30,6 +31,7 @@ from smart_report_builder.practical import (
     add_measurement_table,
     apply_assignment_candidate,
     apply_master_roi,
+    apply_ready_candidates,
     apply_variant,
     assignment_candidates,
     capture_master_roi,
@@ -62,6 +64,8 @@ def test_assignment_candidates_wait_for_a_choice(tmp_path: Path):
     project.slide.bindings = []
     ready = [item for item in assignment_candidates(project) if item.status == "ready"]
     assert [(item.element_id, item.asset_id) for item in ready] == [(FRAME_OVERALL_ID, "asset-overall"), (FRAME_COMPARE_ID, "asset-compare")]
+    assert {item.confidence for item in ready} == {1.0}
+    assert {item.label for item in ready} == {"確定候補"}
     before = [item.asset_id for item in project.slide.bindings]
     assert before == []
     apply_assignment_candidate(project, FRAME_OVERALL_ID, "asset-overall")
@@ -77,13 +81,189 @@ def test_partial_names_stay_unconfirmed():
     project.assets.append(
         Asset(id="asset-extra", path="overall-copy.png", width_px=10, height_px=10, display_name="全体画像")
     )
-    confirm = [
+    conflicts = [
         item
         for item in assignment_candidates(project)
-        if item.element_id == FRAME_OVERALL_ID and item.status == "confirm"
+        if item.element_id == FRAME_OVERALL_ID and item.status == "conflict"
     ]
-    assert {item.asset_id for item in confirm} == {"asset-overall", "asset-extra"}
+    assert {item.asset_id for item in conflicts} == {"asset-overall", "asset-extra"}
+    assert {item.label for item in conflicts} == {"競合"}
     assert project.slide.bindings == []
+
+
+def test_role_keywords_and_folder_order_wait_for_acceptance(tmp_path: Path):
+    project = create_report(image_count=2)
+    project.assets = [
+        _asset(tmp_path / "lot" / "全体_01.png", "asset-overall", (80, 40)),
+        _asset(tmp_path / "lot" / "比較-02.png", "asset-compare", (40, 80)),
+        _asset(tmp_path / "lot" / "plain-b.png", "asset-b", (20, 20)),
+        _asset(tmp_path / "lot" / "plain-a.png", "asset-a", (20, 20)),
+    ]
+    before = project_to_dict(project)
+    found = assignment_candidates(project)
+    assert project_to_dict(project) == before
+    ready = {(item.element_id, item.asset_id, item.confidence, item.reason) for item in found if item.status == "ready"}
+    assert ready == {
+        ("frame-overall", "asset-overall", 0.9, "ファイル名の役割語が一致"),
+        ("frame-compare", "asset-compare", 0.9, "ファイル名の役割語が一致"),
+    }
+    assert all(item.label == "確定候補" for item in found if item.status == "ready")
+    assert [(item.element_id, item.asset_id) for item in found if item.status != "ready"] == []
+
+    project.assets = [
+        _asset(tmp_path / "only" / "plain-b.png", "asset-b", (20, 20)),
+        _asset(tmp_path / "only" / "plain-a.png", "asset-a", (20, 20)),
+    ]
+    ordered = [item for item in assignment_candidates(project) if item.status == "confirm"]
+    assert [(item.element_id, item.asset_id, item.label, item.reason) for item in ordered] == [
+        ("frame-overall", "asset-a", "確認推奨", "同じフォルダのファイル名順"),
+        ("frame-compare", "asset-b", "確認推奨", "同じフォルダのファイル名順"),
+    ]
+    assert all(item.confidence == 0.5 for item in ordered)
+    assert apply_ready_candidates(project) == []
+    assert project.slide.bindings == []
+    apply_assignment_candidate(project, "frame-compare", "asset-b")
+    assert project.slide.bindings == [Binding(element_id="frame-compare", asset_id="asset-b")]
+    assert all(item.element_id != "frame-overall" or item.asset_id != "asset-b" for item in assignment_candidates(project))
+
+
+def test_ambiguous_keywords_are_conflicts_and_do_not_overwrite(tmp_path: Path):
+    project = create_report(image_count=2)
+    project.assets = [
+        _asset(tmp_path / "全体_a.png", "asset-a", (10, 10)),
+        _asset(tmp_path / "全体_b.png", "asset-b", (10, 10)),
+        _asset(tmp_path / "全体_比較.png", "asset-both", (10, 10)),
+        _asset(tmp_path / "zooming.png", "asset-zoomish", (10, 10)),
+        _asset(tmp_path / "処理後_1.png", "asset-processed", (10, 10)),
+    ]
+    conflicts = [
+        (item.element_id, item.asset_id)
+        for item in assignment_candidates(project)
+        if item.status == "conflict" and item.label == "競合"
+    ]
+    assert ("frame-overall", "asset-a") in conflicts
+    assert ("frame-overall", "asset-b") in conflicts
+    assert ("frame-overall", "asset-both") in conflicts
+    assert ("frame-compare", "asset-both") in conflicts
+    assert all(item.asset_id != "asset-zoomish" for item in assignment_candidates(project))
+    assert all(item.asset_id != "asset-processed" for item in assignment_candidates(project))
+    assert apply_ready_candidates(project) == []
+    assert project.slide.bindings == []
+    apply_assignment_candidate(project, "frame-compare", "asset-both")
+    assert [(item.element_id, item.asset_id) for item in project.slide.bindings] == [
+        ("frame-compare", "asset-both")
+    ]
+    project.slide.bindings = []
+    with pytest.raises(ValueError, match="候補にありません"):
+        apply_assignment_candidate(project, "frame-overall", "missing")
+
+    project.slide.bindings = [Binding(element_id="frame-overall", asset_id="asset-kept")]
+    project.assets.append(_asset(tmp_path / "kept.png", "asset-kept", (8, 8)))
+    kept = project_to_dict(project)
+    assert all(item.element_id != "frame-overall" for item in assignment_candidates(project))
+    with pytest.raises(ValueError, match="上書きしません"):
+        apply_assignment_candidate(project, "frame-overall", "asset-a")
+    assert project_to_dict(project) == kept
+
+
+def test_custom_synonyms_and_zoom_role_need_a_contain_frame(tmp_path: Path):
+    project = create_report(template="overall-zoom")
+    project.assets = [
+        _asset(tmp_path / "外観01.png", "asset-look", (30, 20)),
+        _asset(tmp_path / "拡大_9.png", "asset-zoom", (12, 12)),
+    ]
+    untouched = assignment_candidates(project)
+    assert [(item.asset_id, item.status, item.label) for item in untouched] == [
+        ("asset-look", "confirm", "確認推奨")
+    ]
+    assert all(item.element_id != "frame-zoom" for item in untouched)
+    custom = {"overall": ["外観"]}
+    found = assignment_candidates(project, custom)
+    assert [(item.element_id, item.asset_id, item.status) for item in found] == [
+        ("frame-overall", "asset-look", "ready")
+    ]
+    processed_project = create_report(template="overall-zoom")
+    images = processed_project.content_master.root.children[0]
+    images.children.append(
+        ImageFrameNode(id="frame-processed", role_id="processed", display_name="処理", fit_mode=FitMode.CONTAIN)
+    )
+    processed_project.assets = [_asset(tmp_path / "pics" / "処理_3.png", "asset-proc", (16, 16))]
+    processed = [item for item in assignment_candidates(processed_project) if item.element_id == "frame-processed"]
+    assert [(item.asset_id, item.status, item.confidence) for item in processed] == [("asset-proc", "ready", 0.9)]
+    assert all(item.element_id != "frame-zoom" for item in assignment_candidates(processed_project))
+    assert project.slide.bindings == []
+
+
+def test_suggest_and_accept_ready_commands_leave_conflicts(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    project = create_report()
+    project.assets = [
+        _asset(tmp_path / "batch" / "全体.png", "asset-overall", (24, 16)),
+        _asset(tmp_path / "batch" / "note.png", "asset-note", (24, 16)),
+        _asset(tmp_path / "other" / "extra.png", "asset-extra", (16, 24)),
+    ]
+    path = tmp_path / "project.json"
+    save_project(project, path)
+    before = path.read_bytes()
+    synonyms = tmp_path / "synonyms.json"
+    synonyms.write_text('{"overall": ["全体"], "comparison": ["比較"]}\n', encoding="utf-8")
+    assert main(["suggest", str(path), "--synonyms", str(synonyms)]) == 0
+    assert path.read_bytes() == before
+    lines = [line for line in capsys.readouterr().out.splitlines() if line and line != "none"]
+    assert any(line.startswith("ready\tframe-overall\tasset-overall\t") and "\t0.90\t確定候補\t" in line for line in lines)
+    assert any(line.startswith("conflict\t") and line.endswith("フォルダが複数あるため、並びを自動では選べない") for line in lines)
+
+    assert main(["accept-ready", str(path), "--synonyms", str(synonyms)]) == 0
+    saved = load_project(path)
+    assert [(item.element_id, item.asset_id) for item in saved.slide.bindings] == [("frame-overall", "asset-overall")]
+    output = capsys.readouterr().out
+    assert "assigned frame-overall asset-overall" in output
+    assert "frame-compare" not in output
+
+
+def test_broken_synonym_file_does_not_change_the_project(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    project = create_report()
+    path = tmp_path / "project.json"
+    save_project(project, path)
+    before = path.read_bytes()
+    broken = tmp_path / "synonyms.json"
+    broken.write_text("{", encoding="utf-8")
+    assert main(["suggest", str(path), "--synonyms", str(broken)]) == 1
+    assert "同義語ファイルを読めない" in capsys.readouterr().err
+    assert path.read_bytes() == before
+    missing = tmp_path / "missing.json"
+    assert main(["accept-ready", str(path), "--synonyms", str(missing)]) == 1
+    assert path.read_bytes() == before
+
+
+def test_session_lists_candidates_without_writing_and_accepts_on_save(tmp_path: Path):
+    from smart_report_builder.edit_session import EditSession
+
+    project = create_report()
+    project.assets = [_asset(tmp_path / "pics" / "比較.png", "asset-compare", (12, 20))]
+    project_path, layout_path, pptx_path = tmp_path / "layout.project.json", tmp_path / "layout.layout.json", tmp_path / "layout.pptx"
+    save_project(project, project_path)
+    before = project_path.read_bytes()
+    session = EditSession()
+    session.open(str(project_path), str(layout_path), str(pptx_path))
+    listed = session.run(["suggest", str(project_path)])
+    assert listed["code"] == 0
+    assert listed["dirty"] is False
+    assert "ready\tframe-compare\tasset-compare\t" in listed["stdout"]
+    assert "0.90\t確定候補\tファイル名の役割語が一致" in listed["stdout"]
+    assert project_path.read_bytes() == before
+    assert not layout_path.exists()
+
+    accepted = session.run(["accept-ready", str(project_path), "--layout", str(layout_path), "--pptx", str(pptx_path)])
+    assert accepted["code"] == 0
+    assert accepted["dirty"] is True
+    assert project_path.read_bytes() == before
+    assert not pptx_path.exists()
+    assert accepted["project"]["slide"]["bindings"] == [
+        {"elementId": "frame-compare", "assetId": "asset-compare", "text": None}
+    ]
+    saved = session.save()
+    assert saved["code"] == 0
+    assert load_project(project_path).slide.bindings[0].asset_id == "asset-compare"
 
 
 def test_overflow_offers_at_most_three_variants_until_one_is_chosen():
@@ -457,5 +637,17 @@ def _frame(project, element_id: str) -> ImageFrameNode:
 
 
 def _png(path: Path, size: tuple[int, int]) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", size, (20, 40, 60)).save(path, format="PNG")
     return path
+
+
+def _asset(path: Path, asset_id: str, size: tuple[int, int]) -> Asset:
+    _png(path, size)
+    return Asset(
+        id=asset_id,
+        path=str(path),
+        width_px=size[0],
+        height_px=size[1],
+        display_name=path.stem,
+    )

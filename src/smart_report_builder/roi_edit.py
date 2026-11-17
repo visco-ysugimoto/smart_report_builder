@@ -914,6 +914,8 @@ def main(argv: list[str] | None = None) -> int:
         return _suggest(args[1:])
     if args and args[0] == "apply-suggestion":
         return _apply_suggestion(args[1:])
+    if args and args[0] == "accept-ready":
+        return _accept_ready(args[1:])
     if args and args[0] == "variants":
         return _variants(args[1:])
     if args and args[0] == "apply-variant":
@@ -2046,14 +2048,15 @@ def _copy_bytes(source: Path, destination: Path) -> None:
 
 
 def _suggest(argv: list[str]) -> int:
-    from smart_report_builder.practical import assignment_candidates
+    from smart_report_builder.practical import assignment_candidates, candidate_line
 
     parser = argparse.ArgumentParser(description="List assignment candidates without saving")
     parser.add_argument("project")
+    parser.add_argument("--synonyms")
     args = parser.parse_args(argv)
     try:
         project = load_project(args.project)
-        found = assignment_candidates(project)
+        found = assignment_candidates(project, _load_synonyms(args.synonyms))
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -2061,7 +2064,7 @@ def _suggest(argv: list[str]) -> int:
         print("none")
         return 0
     for item in found:
-        print(f"{item.status}\t{item.element_id}\t{item.asset_id}\t{item.asset_name}\t{item.reason}")
+        print(candidate_line(item))
     return 0
 
 
@@ -2074,16 +2077,70 @@ def _apply_suggestion(argv: list[str]) -> int:
     parser.add_argument("asset_id")
     parser.add_argument("--layout")
     parser.add_argument("--pptx")
+    parser.add_argument("--synonyms")
     args = parser.parse_args(argv)
     try:
         project = load_project(args.project)
-        apply_assignment_candidate(project, args.element_id, args.asset_id)
+        apply_assignment_candidate(
+            project,
+            args.element_id,
+            args.asset_id,
+            _load_synonyms(args.synonyms),
+        )
         _save_outputs(project, args.project, args.layout, args.pptx)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"assigned {args.element_id} {args.asset_id}")
     return 0
+
+
+def _accept_ready(argv: list[str]) -> int:
+    from smart_report_builder.practical import apply_ready_candidates
+
+    parser = argparse.ArgumentParser(description="Assign every ready candidate and leave the rest")
+    parser.add_argument("project")
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    parser.add_argument("--synonyms")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        applied = apply_ready_candidates(project, _load_synonyms(args.synonyms))
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not applied:
+        print("none")
+        return 0
+    try:
+        _save_outputs(project, args.project, args.layout, args.pptx)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for element_id, asset_id in applied:
+        print(f"assigned {element_id} {asset_id}")
+    return 0
+
+
+def _load_synonyms(path: str | None) -> dict[str, list[str]] | None:
+    if not path:
+        return None
+    source = Path(path)
+    if not source.is_file():
+        raise ValueError("同義語ファイルが見つからない")
+    try:
+        payload = json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError("同義語ファイルを読めない") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("同義語ファイルがオブジェクトではない")
+    table: dict[str, list[str]] = {}
+    for role_id, words in payload.items():
+        if not isinstance(words, list) or not all(isinstance(word, str) for word in words):
+            raise ValueError("同義語は役割ごとの文字列配列です")
+        table[str(role_id)] = list(words)
+    return table
 
 
 def _variants(argv: list[str]) -> int:

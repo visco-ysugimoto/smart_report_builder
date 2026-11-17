@@ -481,6 +481,27 @@ void main() {
     expect(candidates.single.status, 'ready');
     expect(candidates.single.assetId, 'asset-overall');
     expect(candidates.single.reason, '表示名が一致');
+    expect(candidates.single.label, '確定候補');
+  });
+
+  test('suggested lines keep confidence and do not treat conflicts as ready', () {
+    const stdout = '''
+ready\tframe-overall\tasset-a\t全体_01\t0.90\t確定候補\tファイル名の役割語が一致
+confirm\tframe-compare\tasset-b\tplain-a\t0.50\t確認推奨\t同じフォルダのファイル名順
+conflict\tframe-overall\tasset-c\t全体_b\t0.40\t競合\t役割語が一致する素材が複数ある
+none
+''';
+    final candidates = parseSuggestedAssignments(stdout);
+    expect(candidates.map((item) => item.status), ['ready', 'confirm', 'conflict']);
+    expect(candidates[0].confidence, 0.9);
+    expect(candidates[1].label, '確認推奨');
+    expect(candidates[2].mark, '競合');
+    expect(candidates.where((item) => item.canAcceptAll).length, 1);
+    expect(
+      assignmentCandidateLabel(candidates[2], frameName: '全体画像'),
+      '競合 40%: 全体_b → 全体画像（役割語が一致する素材が複数ある）',
+    );
+    expect(parseSuggestedAssignments('none\n'), isEmpty);
   });
 
   test('a table cell saves only when its text changes', () {

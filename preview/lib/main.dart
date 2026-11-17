@@ -1121,8 +1121,17 @@ class _PreviewHomeState extends State<PreviewHome> {
           );
         }
       }
+      if (_candidates.any((item) => item.canAcceptAll)) {
+        add('accept-ready', '確定候補をすべて採用');
+      }
       for (final candidate in _candidates) {
-        add('candidate|${candidate.key}', '候補: ${candidate.assetName}');
+        add(
+          'candidate|${candidate.key}',
+          assignmentCandidateLabel(
+            candidate,
+            frameName: _frameName(candidate.frameId),
+          ),
+        );
       }
       if (_pages.length >= 2) {
         add('remove-slide', 'このスライドを削除');
@@ -1264,6 +1273,8 @@ class _PreviewHomeState extends State<PreviewHome> {
       case 'drop-asset':
         setState(() => _assetTargetId = parts[1]);
         await _onRemoveUnusedAsset();
+      case 'accept-ready':
+        await _onAcceptReady();
       case 'candidate':
         setState(() => _candidateKey = parts[1]);
         await _onApplyCandidate();
@@ -1694,6 +1705,26 @@ class _PreviewHomeState extends State<PreviewHome> {
   }
 
   Future<List<AssignmentCandidate>> _readCandidates(String layoutPath) async {
+    final python = pythonExecutableNearLayout(layoutPath);
+    final projectPath = projectPathForLayout(layoutPath);
+    final pptxPath = pptxPathForLayout(layoutPath);
+    if (python != null &&
+        projectPath != null &&
+        pptxPath != null &&
+        File(projectPath).existsSync()) {
+      if (!reportSession.covers(layoutPath)) {
+        await reportSession.open(
+          pythonExecutable: python,
+          projectPath: projectPath,
+          layoutPath: layoutPath,
+          pptxPath: pptxPath,
+        );
+      }
+      return listAssignmentCandidates(
+        pythonExecutable: python,
+        projectPath: projectPath,
+      );
+    }
     final text = await _projectDocument(layoutPath);
     if (text == null) {
       return [];
@@ -2693,6 +2724,7 @@ class _PreviewHomeState extends State<PreviewHome> {
                 key: const Key('dataset-groups'),
               ),
             ],
+            _assignmentCandidates(),
                               ],
                             ),
                           ),
@@ -3905,6 +3937,83 @@ class _PreviewHomeState extends State<PreviewHome> {
       }
     }
     return null;
+  }
+
+  String _frameName(String frameId) {
+    for (final element in _result?.elements ?? const <PlacedElement>[]) {
+      if (element.elementId == frameId) {
+        return element.displayName;
+      }
+    }
+    return frameId;
+  }
+
+  Widget _assignmentCandidates() {
+    final candidates = _candidates;
+    if (candidates.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Column(
+      key: const Key('assignment-candidates'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 8),
+        const Text('割当候補'),
+        for (final candidate in candidates)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  child: Text(
+                    assignmentCandidateLabel(
+                      candidate,
+                      frameName: _frameName(candidate.frameId),
+                    ),
+                    key: Key('candidate-line:${candidate.key}'),
+                  ),
+                ),
+                TextButton(
+                  key: Key('accept-candidate:${candidate.key}'),
+                  onPressed: _saving
+                      ? null
+                      : () {
+                          setState(() => _candidateKey = candidate.key);
+                          _onApplyCandidate();
+                        },
+                  child: const Text('この候補を採用'),
+                ),
+              ],
+            ),
+          ),
+        if (candidates.any((item) => item.canAcceptAll))
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              key: const Key('accept-ready-candidates'),
+              onPressed: _saving ? null : _onAcceptReady,
+              child: const Text('確定候補をすべて採用'),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _onAcceptReady() async {
+    if (_saving || !_candidates.any((item) => item.canAcceptAll)) {
+      return;
+    }
+    await _runProjectCommand(
+      '確定候補を割り当てています',
+      (python, projectPath, layoutPath, pptxPath) => acceptReadyAssignments(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+      ),
+      '確定候補を割り当てました。確認推奨と競合はそのままです。',
+    );
   }
 
   Future<void> _onApplyCandidate() async {

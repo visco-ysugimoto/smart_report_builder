@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:smart_report_preview/layout_result.dart';
+import 'package:smart_report_preview/roi_links.dart';
 
 /// 配置 JSON がディスクに書かれたとき。PPTX の書き出し完了は待たない。
 void Function(String layoutPath)? reportLayoutReady;
@@ -890,6 +891,55 @@ Future<void> createReportProject({
   if (result.exitCode != 0) {
     final message = '${result.stderr}'.trim();
     throw FormatException(message.isEmpty ? 'プロジェクトを作成できません' : message);
+  }
+}
+
+Future<List<AssignmentCandidate>> listAssignmentCandidates({
+  required String pythonExecutable,
+  required String projectPath,
+  String? synonymsPath,
+}) async {
+  final arguments = <String>[
+    '-m',
+    'smart_report_builder.roi_edit',
+    'suggest',
+    projectPath,
+  ];
+  if (synonymsPath != null && synonymsPath.isNotEmpty) {
+    arguments.addAll(['--synonyms', synonymsPath]);
+  }
+  final result = await runReportCommand(pythonExecutable, arguments);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '割当候補を読めません' : message);
+  }
+  return parseSuggestedAssignments('${result.stdout}');
+}
+
+Future<void> acceptReadyAssignments({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  String? synonymsPath,
+}) async {
+  final arguments = <String>[
+    '-m',
+    'smart_report_builder.roi_edit',
+    'accept-ready',
+    projectPath,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ];
+  if (synonymsPath != null && synonymsPath.isNotEmpty) {
+    arguments.addAll(['--synonyms', synonymsPath]);
+  }
+  final result = await runReportCommand(pythonExecutable, arguments);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '確定候補を割り当てできません' : message);
   }
 }
 

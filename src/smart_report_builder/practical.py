@@ -1,11 +1,14 @@
 """自動割当の候補、レイアウト案、ROI の継承、表。
 
 候補と案は、このモジュールを呼んだだけでは保存しない。
-適用関数はプロジェクトを書き換えるが、ファイルには書かない。
+確定候補の一括採用と、選んだ1件の採用だけが割当を書く。確認推奨と競合は自動では選ばない。
+適用関数はプロジェクトを書き換えるが、ファイルには書かない。手動で入っている割当は上書きしない。
 """
 
 from __future__ import annotations
 
+import re
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from smart_report_builder.layout import layout_slide
@@ -30,13 +33,43 @@ from smart_report_builder.models import (
 _EPS = 1e-6
 
 
+# 画面と IPC が共通で使う状態。確定候補だけを一括採用できる。
+STATUS_READY = "ready"
+STATUS_REVIEW = "confirm"
+STATUS_CONFLICT = "conflict"
+LABEL_READY = "確定候補"
+LABEL_REVIEW = "確認推奨"
+LABEL_CONFLICT = "競合"
+
+# 内部 role ID への同義語。呼び出し側が辞書を渡すと、この表の代わりに使う。
+DEFAULT_ROLE_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "overall": ("全体画像", "全体", "overall"),
+    "comparison": ("比較画像", "比較", "comparison"),
+    "zoom": ("拡大画像", "拡大", "zoom"),
+    "processed": ("処理後画像", "処理後", "処理", "processed"),
+}
+
+_TOKEN = re.compile(r"[0-9A-Za-z\u3040-\u30ff\u4e00-\u9fff]+")
+
+
 class AssignmentCandidate:
-    def __init__(self, status: str, element_id: str, asset_id: str, asset_name: str, reason: str) -> None:
+    def __init__(
+        self,
+        status: str,
+        element_id: str,
+        asset_id: str,
+        asset_name: str,
+        reason: str,
+        confidence: float = 1.0,
+        label: str = "",
+    ) -> None:
         self.status = status
         self.element_id = element_id
         self.asset_id = asset_id
         self.asset_name = asset_name
         self.reason = reason
+        self.confidence = float(confidence)
+        self.label = label or _label_for(status)
 
 
 class LayoutProposal:
@@ -47,56 +80,148 @@ class LayoutProposal:
         self.selected = selected
 
 
-def assignment_candidates(project: Project) -> list[AssignmentCandidate]:
-    """空の通常表示の枠へ、未使用の素材の候補を出す。割り当てはしない。"""
+def assignment_candidates(
+    project: Project,
+    synonyms: Mapping[str, Sequence[str]] | None = None,
+) -> list[AssignmentCandidate]:
+    """空の通常表示の枠へ、未使用の素材の候補を出す。割り当てはしない。
+
+    確定候補は名前か役割語が1対1のときだけ。役割語が重なる、同じ枠に複数一致する、
+    フォルダが複数ある場合は競合にする。フォルダ内のファイル名順は確認推奨で、自動では選ばない。
+    """
+    table = _synonym_table(synonyms)
     used = {item.asset_id for item in project.slide.bindings if item.asset_id}
-    bound = {item.element_id: item.asset_id for item in project.slide.bindings}
+    bound = {item.element_id: item.asset_id for item in project.slide.bindings if item.asset_id}
+    frames = [
+        frame
+        for frame in _image_frames(project.content_master.root)
+        if frame.fit_mode == FitMode.CONTAIN and frame.id not in bound
+    ]
     unused = [asset for asset in project.assets if asset.id not in used]
     found: list[AssignmentCandidate] = []
-    for frame in _image_frames(project.content_master.root):
-        if frame.fit_mode != FitMode.CONTAIN:
-            continue
-        if bound.get(frame.id):
-            continue
+    taken_assets: set[str] = set()
+    taken_frames: set[str] = set()
+
+    for frame in frames:
         exact = [asset for asset in unused if _exact_match(frame, asset)]
         if len(exact) == 1:
-            asset = exact[0]
-            found.append(
-                AssignmentCandidate("ready", frame.id, asset.id, asset.display_name, "表示名が一致")
-            )
-            continue
-        if len(exact) > 1:
+            found.append(_make_candidate(STATUS_READY, frame, exact[0], "表示名が一致", 1.0))
+            taken_assets.add(exact[0].id)
+            taken_frames.add(frame.id)
+        elif len(exact) > 1:
             for asset in exact:
                 found.append(
-                    AssignmentCandidate(
-                        "confirm",
-                        frame.id,
-                        asset.id,
-                        asset.display_name,
-                        "一致する素材が複数ある",
-                    )
+                    _make_candidate(STATUS_CONFLICT, frame, asset, "同じ枠に一致する素材が複数ある", 0.4)
                 )
-            continue
-        partial = [asset for asset in unused if _partial_match(frame, asset)]
-        for asset in partial:
+                taken_assets.add(asset.id)
+            taken_frames.add(frame.id)
+
+    keyword_frames = [frame for frame in frames if frame.id not in taken_frames]
+    keyword_assets = [asset for asset in unused if asset.id not in taken_assets]
+    hits = {asset.id: _matching_roles(asset, table) for asset in keyword_assets}
+    frame_roles = {frame.role_id for frame in keyword_frames}
+    by_frame: dict[str, list] = {frame.id: [] for frame in keyword_frames}
+    by_asset: dict[str, list] = {asset.id: [] for asset in keyword_assets}
+    for frame in keyword_frames:
+        for asset in keyword_assets:
+            roles = hits[asset.id]
+            if frame.role_id in roles and roles == {frame.role_id}:
+                by_frame[frame.id].append(asset)
+                by_asset[asset.id].append(frame)
+    for frame in keyword_frames:
+        matched = by_frame[frame.id]
+        if len(matched) == 1 and len(by_asset[matched[0].id]) == 1:
+            found.append(_make_candidate(STATUS_READY, frame, matched[0], "ファイル名の役割語が一致", 0.9))
+            taken_assets.add(matched[0].id)
+            taken_frames.add(frame.id)
+        elif len(matched) > 1:
+            for asset in matched:
+                found.append(
+                    _make_candidate(STATUS_CONFLICT, frame, asset, "役割語が一致する素材が複数ある", 0.4)
+                )
+                taken_assets.add(asset.id)
+            taken_frames.add(frame.id)
+        elif len(matched) == 1:
             found.append(
-                AssignmentCandidate(
-                    "confirm",
-                    frame.id,
-                    asset.id,
-                    asset.display_name,
-                    "名前の一部だけ一致",
-                )
+                _make_candidate(STATUS_CONFLICT, frame, matched[0], "同じ素材が複数の枠の役割語に一致", 0.4)
             )
+            taken_assets.add(matched[0].id)
+            taken_frames.add(frame.id)
+    ambiguous_rows: list[tuple[ImageFrameNode, list]] = []
+    for frame in keyword_frames:
+        if frame.id in taken_frames:
+            continue
+        ambiguous = [
+            asset
+            for asset in keyword_assets
+            if asset.id not in taken_assets and frame.role_id in hits[asset.id] and len(hits[asset.id]) > 1
+        ]
+        if ambiguous:
+            ambiguous_rows.append((frame, ambiguous))
+    for frame, ambiguous in ambiguous_rows:
+        multi_frame = [asset for asset in ambiguous if len(hits[asset.id] & frame_roles) >= 2]
+        chosen = multi_frame or ambiguous
+        status = STATUS_CONFLICT if multi_frame or len(chosen) > 1 else STATUS_REVIEW
+        reason = "ファイル名に複数の役割語がある" if status == STATUS_CONFLICT else "ファイル名にほかの役割語もある"
+        confidence = 0.35 if status == STATUS_CONFLICT else 0.6
+        for asset in chosen:
+            found.append(_make_candidate(status, frame, asset, reason, confidence))
+            taken_assets.add(asset.id)
+        taken_frames.add(frame.id)
+    for frame in keyword_frames:
+        for asset in keyword_assets:
+            if len(hits[asset.id] & frame_roles) < 2 or frame.role_id not in hits[asset.id]:
+                continue
+            if any(item.element_id == frame.id and item.asset_id == asset.id for item in found):
+                continue
+            found.append(_make_candidate(STATUS_CONFLICT, frame, asset, "ファイル名に複数の役割語がある", 0.35))
+            taken_assets.add(asset.id)
+            taken_frames.add(frame.id)
+
+    partial_frames = [frame for frame in frames if frame.id not in taken_frames]
+    partial_assets = [asset for asset in unused if asset.id not in taken_assets]
+    for frame in partial_frames:
+        partial = [asset for asset in partial_assets if _partial_match(frame, asset)]
+        if len(partial) == 1:
+            found.append(_make_candidate(STATUS_REVIEW, frame, partial[0], "名前の一部だけ一致", 0.6))
+            taken_assets.add(partial[0].id)
+            taken_frames.add(frame.id)
+        elif len(partial) > 1:
+            for asset in partial:
+                found.append(
+                    _make_candidate(STATUS_CONFLICT, frame, asset, "名前の一部が複数の素材に一致", 0.4)
+                )
+                taken_assets.add(asset.id)
+            taken_frames.add(frame.id)
+
+    order_frames = [frame for frame in frames if frame.id not in taken_frames]
+    order_assets = [asset for asset in unused if asset.id not in taken_assets]
+    found.extend(_folder_order_candidates(order_frames, order_assets))
     return found
 
 
-def apply_assignment_candidate(project: Project, element_id: str, asset_id: str) -> str:
+def apply_assignment_candidate(
+    project: Project,
+    element_id: str,
+    asset_id: str,
+    synonyms: Mapping[str, Sequence[str]] | None = None,
+) -> str:
+    """選ばれた候補を1件だけ割り当てる。手動の割当は上書きしない。"""
+    current = next(
+        (item for item in project.slide.bindings if item.element_id == element_id and item.asset_id),
+        None,
+    )
+    if current is not None:
+        if current.asset_id == asset_id:
+            raise ValueError("この枠にはすでにその素材が割り当てられています")
+        raise ValueError("手動の割当は上書きしません")
     match = next(
         (
             item
-            for item in assignment_candidates(project)
-            if item.element_id == element_id and item.asset_id == asset_id and item.status in {"ready", "confirm"}
+            for item in assignment_candidates(project, synonyms)
+            if item.element_id == element_id
+            and item.asset_id == asset_id
+            and item.status in {STATUS_READY, STATUS_REVIEW, STATUS_CONFLICT}
         ),
         None,
     )
@@ -105,6 +230,37 @@ def apply_assignment_candidate(project: Project, element_id: str, asset_id: str)
     from smart_report_builder.roi_edit import assign_registered_asset
 
     return assign_registered_asset(project, element_id, asset_id)
+
+
+def apply_ready_candidates(
+    project: Project,
+    synonyms: Mapping[str, Sequence[str]] | None = None,
+) -> list[tuple[str, str]]:
+    """確定候補だけを割り当てる。確認推奨と競合は残す。"""
+    applied: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    while True:
+        ready = [
+            item
+            for item in assignment_candidates(project, synonyms)
+            if item.status == STATUS_READY and (item.element_id, item.asset_id) not in seen
+        ]
+        if not ready:
+            return applied
+        chosen = ready[0]
+        key = (chosen.element_id, chosen.asset_id)
+        seen.add(key)
+        apply_assignment_candidate(project, chosen.element_id, chosen.asset_id, synonyms)
+        applied.append(key)
+
+
+def candidate_line(item: AssignmentCandidate) -> str:
+    reason = item.reason.replace("\t", " ").replace("\n", " ")
+    name = item.asset_name.replace("\t", " ").replace("\n", " ")
+    return (
+        f"{item.status}\t{item.element_id}\t{item.asset_id}\t{name}\t"
+        f"{item.confidence:.2f}\t{item.label}\t{reason}"
+    )
 
 
 def propose_variants(project: Project) -> list[LayoutProposal]:
@@ -509,6 +665,81 @@ def set_table_cell(project: Project, element_id: str, row: int, column: int, tex
         raise ValueError("表の列が見つからない")
     table.rows[body][column] = text
     return text
+
+
+def _label_for(status: str) -> str:
+    if status == STATUS_READY:
+        return LABEL_READY
+    if status == STATUS_CONFLICT:
+        return LABEL_CONFLICT
+    return LABEL_REVIEW
+
+
+def _make_candidate(status: str, frame: ImageFrameNode, asset, reason: str, confidence: float) -> AssignmentCandidate:
+    return AssignmentCandidate(
+        status,
+        frame.id,
+        asset.id,
+        asset.display_name,
+        reason,
+        confidence,
+        _label_for(status),
+    )
+
+
+def _synonym_table(synonyms: Mapping[str, Sequence[str]] | None) -> dict[str, tuple[str, ...]]:
+    source = DEFAULT_ROLE_SYNONYMS if synonyms is None else synonyms
+    table: dict[str, tuple[str, ...]] = {}
+    for role_id, words in source.items():
+        cleaned = tuple(word.strip() for word in words if word and word.strip())
+        if cleaned:
+            table[str(role_id)] = cleaned
+    return table
+
+
+def _matching_roles(asset, table: Mapping[str, Sequence[str]]) -> set[str]:
+    texts = [asset.display_name, Path(asset.path).stem, Path(asset.path).parent.name]
+    found: set[str] = set()
+    for role_id, words in table.items():
+        if any(_synonym_in_text(text, word) for text in texts for word in words):
+            found.add(role_id)
+    return found
+
+
+def _synonym_in_text(text: str, synonym: str) -> bool:
+    needle = synonym.casefold()
+    if len(needle) < 2:
+        return False
+    for token in _TOKEN.findall(text):
+        folded = token.casefold()
+        if folded == needle:
+            return True
+        if not folded.startswith(needle):
+            continue
+        rest = folded[len(needle) :]
+        if rest and rest[0].isascii() and rest[0].isalpha():
+            continue
+        return True
+    return False
+
+
+def _folder_order_candidates(frames: list[ImageFrameNode], assets: list) -> list[AssignmentCandidate]:
+    if not frames or not assets:
+        return []
+    groups: dict[str, list] = {}
+    for asset in assets:
+        key = str(Path(asset.path).parent)
+        groups.setdefault(key, []).append(asset)
+    several = len(groups) > 1
+    status = STATUS_CONFLICT if several else STATUS_REVIEW
+    reason = "フォルダが複数あるため、並びを自動では選べない" if several else "同じフォルダのファイル名順"
+    confidence = 0.35 if several else 0.5
+    found: list[AssignmentCandidate] = []
+    for grouped in groups.values():
+        ordered = sorted(grouped, key=lambda asset: Path(asset.path).name.casefold())
+        for frame, asset in zip(frames, ordered, strict=False):
+            found.append(_make_candidate(status, frame, asset, reason, confidence))
+    return found
 
 
 def _exact_match(frame: ImageFrameNode, asset) -> bool:
