@@ -1,5 +1,9 @@
 import 'dart:convert';
 
+bool supportedProjectSchema(Object? version) {
+  return version is num && (version == 1 || version == 2);
+}
+
 /// プロジェクト JSON から、ROI とその拡大枠 ID だけを読む。配置は計算しない。
 Map<String, String?> parseRoiZoomLinks(String source) {
   final decoded = jsonDecode(source);
@@ -7,7 +11,7 @@ Map<String, String?> parseRoiZoomLinks(String source) {
     throw const FormatException('JSON オブジェクトではない');
   }
   final version = decoded['schemaVersion'];
-  if (version is! num || version != 1) {
+  if (!supportedProjectSchema(version)) {
     throw FormatException('unsupported schemaVersion: $version');
   }
   final slide = decoded['slide'];
@@ -54,7 +58,7 @@ Map<String, String> parseRoiNotes(String source) {
     throw const FormatException('JSON オブジェクトではない');
   }
   final version = decoded['schemaVersion'];
-  if (version is! num || version != 1) {
+  if (!supportedProjectSchema(version)) {
     throw FormatException('unsupported schemaVersion: $version');
   }
   final slide = decoded['slide'];
@@ -93,7 +97,7 @@ Set<String> parseManualNoteIds(String source) {
     throw const FormatException('JSON オブジェクトではない');
   }
   final version = decoded['schemaVersion'];
-  if (version is! num || version != 1) {
+  if (!supportedProjectSchema(version)) {
     throw FormatException('unsupported schemaVersion: $version');
   }
   final slide = decoded['slide'];
@@ -145,7 +149,7 @@ List<RegisteredAsset> parseUnassignedAssets(String source) {
     throw const FormatException('JSON オブジェクトではない');
   }
   final version = decoded['schemaVersion'];
-  if (version is! num || version != 1) {
+  if (!supportedProjectSchema(version)) {
     throw FormatException('unsupported schemaVersion: $version');
   }
   final assets = decoded['assets'];
@@ -205,7 +209,7 @@ List<AssignedAsset> parseAssignedAssets(String source) {
     throw const FormatException('JSON オブジェクトではない');
   }
   final version = decoded['schemaVersion'];
-  if (version is! num || version != 1) {
+  if (!supportedProjectSchema(version)) {
     throw FormatException('unsupported schemaVersion: $version');
   }
   final assets = decoded['assets'];

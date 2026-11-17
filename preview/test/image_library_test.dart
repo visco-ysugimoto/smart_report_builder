@@ -14,7 +14,7 @@ void main() {
       baseLabel: 'g01/01',
       names: ['b.bmp', 'a.bmp', 'c.jpg'],
       references: [
-        (label: 'cap', refs: ['a.bmp', 'c.jpg']),
+        const TaskReference(listName: 'cap', refs: ['a.bmp', 'c.jpg']),
       ],
     );
 
@@ -27,8 +27,8 @@ void main() {
       baseLabel: 'g01/01',
       names: ['a.bmp', 'b.bmp', 'c.bmp'],
       references: [
-        (label: 'one', refs: ['b.bmp']),
-        (label: 'two', refs: ['a.bmp']),
+        const TaskReference(listName: 'one', refs: ['b.bmp']),
+        const TaskReference(listName: 'two', refs: ['a.bmp']),
       ],
     );
 
@@ -46,6 +46,23 @@ void main() {
     final names = parseFileReferences('Comment=ng\nFILE=b.bmp\nFILE=a.bmp\n'.codeUnits);
 
     expect(names, ['b.bmp', 'a.bmp']);
+  });
+
+  test('shows the comment name and keeps every comment line', () {
+    final parsed = parseTaskListText(
+      'Comment=外観\nComment=端部\nFILE=a.bmp\nnote=ignored\n'.codeUnits,
+      listName: 'cap',
+    );
+    expect(parsed.listComment, '外観 / 端部');
+    expect(parsed.refs, ['a.bmp']);
+    final groups = arrangeImageGroups(
+      baseLabel: 'g01/03',
+      names: ['a.bmp', 'b.bmp'],
+      references: [parsed],
+    );
+    expect(groups.single.label, 'g01/03 / 外観 / 端部');
+    expect(groups.single.listName, 'cap');
+    expect(groups.single.names, ['a.bmp', 'b.bmp']);
   });
 
   test('labels a viscotech task image as group/task', () {
@@ -194,6 +211,7 @@ void main() {
                 onOpenDefaultVtv: () {},
                 onPickVtv: () {},
                 onAddTaskFile: () {},
+                onRegisterList: () {},
                 onRemoveSource: (_) {},
                 onClear: () {},
                 loadArchiveBytes: (_) async => Uint8List(0),

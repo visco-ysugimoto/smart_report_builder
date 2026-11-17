@@ -910,6 +910,14 @@ def main(argv: list[str] | None = None) -> int:
         return _remove_asset(args[1:])
     if args and args[0] == "register-folder":
         return _register_folder(args[1:])
+    if args and args[0] == "register-ordered":
+        return _register_ordered(args[1:])
+    if args and args[0] == "set-assignment-rule":
+        return _set_assignment_rule(args[1:])
+    if args and args[0] == "propose-ordered":
+        return _propose_ordered(args[1:])
+    if args and args[0] == "accept-ordered":
+        return _accept_ordered(args[1:])
     if args and args[0] == "suggest":
         return _suggest(args[1:])
     if args and args[0] == "apply-suggestion":
@@ -2047,6 +2055,110 @@ def _copy_bytes(source: Path, destination: Path) -> None:
     except Exception:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _register_ordered(argv: list[str]) -> int:
+    from smart_report_builder.ordered_assignment import register_ordered_assets
+
+    parser = argparse.ArgumentParser(description="Register ordered images without assigning frames")
+    parser.add_argument("project")
+    parser.add_argument("--payload", required=True)
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    args = parser.parse_args(argv)
+    try:
+        records = json.loads(args.payload)
+        if not isinstance(records, list):
+            raise ValueError("素材の一覧が配列ではない")
+        project = load_project(args.project)
+        _added, _updated, ids = register_ordered_assets(project, records)
+        _save_outputs(project, args.project, args.layout, args.pptx)
+    except (ValueError, json.JSONDecodeError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    for asset_id in ids:
+        print(f"asset {asset_id}")
+    return 0
+
+
+def _set_assignment_rule(argv: list[str]) -> int:
+    from smart_report_builder.ordered_assignment import rule_from_payload, set_assignment_rule
+
+    parser = argparse.ArgumentParser(description="Save an assignment rule on the current master")
+    parser.add_argument("project")
+    parser.add_argument("--payload", required=True)
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        set_assignment_rule(project, rule_from_payload(json.loads(args.payload)))
+        _save_outputs(project, args.project, args.layout, args.pptx)
+    except (ValueError, json.JSONDecodeError, KeyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print("rule")
+    return 0
+
+
+def _propose_ordered(argv: list[str]) -> int:
+    from smart_report_builder.ordered_assignment import propose_ordered_assignment, proposal_json
+
+    parser = argparse.ArgumentParser(description="Propose ordered assignments without saving")
+    parser.add_argument("project")
+    parser.add_argument("--group", default="")
+    parser.add_argument("--task", default="")
+    parser.add_argument("--list-name", default="")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        proposal = propose_ordered_assignment(
+            project,
+            group=args.group,
+            task=args.task,
+            list_name=args.list_name,
+        )
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(proposal_json(proposal))
+    return 0
+
+
+def _accept_ordered(argv: list[str]) -> int:
+    from smart_report_builder.ordered_assignment import accept_ordered_assignment
+
+    parser = argparse.ArgumentParser(description="Accept ordered assignment candidates")
+    parser.add_argument("project")
+    parser.add_argument("--group", default="")
+    parser.add_argument("--task", default="")
+    parser.add_argument("--list-name", default="")
+    parser.add_argument("--ordinal", type=int)
+    parser.add_argument("--frame", type=int)
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        applied = accept_ordered_assignment(
+            project,
+            group=args.group,
+            task=args.task,
+            list_name=args.list_name,
+            slide_ordinal=args.ordinal,
+            frame_index=args.frame,
+        )
+        if applied or args.ordinal is None:
+            _save_outputs(project, args.project, args.layout, args.pptx)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if not applied:
+        print("none")
+        return 0
+    for element_id, asset_id in applied:
+        print(f"assigned {element_id} {asset_id}")
+    return 0
 
 
 def _suggest(argv: list[str]) -> int:

@@ -30,7 +30,7 @@ def test_reload_restores_master_bindings_and_layout(tmp_path):
         assert path.read_bytes() == blob
 
     stored = json.loads(destination.read_text(encoding="utf-8"))
-    assert stored["schemaVersion"] == 1
+    assert stored["schemaVersion"] == 2
     assert stored["assets"][0]["path"] == "../images/overall.png"
     assert stored["assets"][1]["path"] == "../images/comparison.png"
     assert DEFAULT_CAPTION in destination.read_text(encoding="utf-8")

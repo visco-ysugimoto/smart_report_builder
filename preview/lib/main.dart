@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -122,6 +123,16 @@ class _PreviewHomeState extends State<PreviewHome> {
   String? _taskPickerOrigin;
   final TextEditingController _taskGroup = TextEditingController(text: '1');
   final TextEditingController _taskNumber = TextEditingController(text: '1');
+  final TextEditingController _ruleOffset = TextEditingController(text: '1');
+  final TextEditingController _ruleStride = TextEditingController(text: '2');
+  final TextEditingController _rulePerSlide = TextEditingController(text: '2');
+  final TextEditingController _ruleNumbers = TextEditingController(text: '1,2');
+  String _ruleMode = 'sequential';
+  String _orderedGroup = '';
+  String _orderedTask = '';
+  String _orderedList = '';
+  List<OrderedCandidate> _orderedCandidates = [];
+  List<String> _orderedWarnings = [];
 
   @override
   void initState() {
@@ -165,6 +176,10 @@ class _PreviewHomeState extends State<PreviewHome> {
     _datasetName.dispose();
     _taskGroup.dispose();
     _taskNumber.dispose();
+    _ruleOffset.dispose();
+    _ruleStride.dispose();
+    _rulePerSlide.dispose();
+    _ruleNumbers.dispose();
     _pageTitle.dispose();
     _pageTitleFocus.dispose();
     _finding.dispose();
@@ -381,6 +396,8 @@ class _PreviewHomeState extends State<PreviewHome> {
         _shareAssetId = _keptShareTarget(assignedAssets);
         _candidates = candidates;
         _candidateKey = _keptCandidate(candidates);
+        _orderedCandidates = [];
+        _orderedWarnings = [];
         _datasets = datasets;
         _datasetId = _keptDataset(datasets);
         _pages = pages.pages;
@@ -2613,6 +2630,7 @@ class _PreviewHomeState extends State<PreviewHome> {
                     onOpenDefaultVtv: libraryBusy ? null : _onOpenDefaultVtv,
                     onPickVtv: libraryBusy ? null : _onPickVtv,
                     onAddTaskFile: libraryBusy ? null : _onAddLibraryTaskFile,
+                    onRegisterList: libraryBusy ? null : _onRegisterLibraryList,
                     onRemoveSource: _removeLibrarySource,
                     onClear: libraryBusy ? null : _clearLibrary,
                     loadArchiveBytes: _loadArchiveBytes,
@@ -2773,6 +2791,7 @@ class _PreviewHomeState extends State<PreviewHome> {
               ),
             ],
             _assignmentCandidates(),
+            _orderedRulePanel(),
                               ],
                             ),
                           ),
@@ -4053,6 +4072,303 @@ class _PreviewHomeState extends State<PreviewHome> {
       }
     }
     return frameId;
+  }
+
+  List<LibraryGroup> _orderedGroups() {
+    return [
+      for (final source in _librarySources)
+        if (source.kind == LibrarySourceKind.vtv || source.kind == LibrarySourceKind.taskFile)
+          for (final group in source.groups)
+            if (group.images.any((image) => image.listIndex != null)) group,
+    ];
+  }
+
+  LibraryGroup? _selectedOrderedGroup() {
+    final groups = _orderedGroups();
+    for (final group in groups) {
+      final image = group.images.first;
+      if (image.group == _orderedGroup && image.task == _orderedTask && image.listName == _orderedList) {
+        return group;
+      }
+    }
+    return groups.isEmpty ? null : groups.first;
+  }
+
+  Widget _orderedRulePanel() {
+    final group = _selectedOrderedGroup();
+    if (group == null && _orderedCandidates.isEmpty) {
+      return const SizedBox.shrink();
+    }
+    final image = group?.images.first;
+    return Column(
+      key: const Key('ordered-rule'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const SizedBox(height: 8),
+        const Text('割付ルール'),
+        if (group != null)
+          DropdownButton<String>(
+            key: const Key('ordered-list'),
+            isExpanded: true,
+            value: '${image?.group}|${image?.task}|${image?.listName}',
+            items: [
+              for (final item in _orderedGroups())
+                DropdownMenuItem(
+                  value: '${item.images.first.group}|${item.images.first.task}|${item.images.first.listName}',
+                  child: Text(item.label),
+                ),
+            ],
+            onChanged: (value) {
+              final chosen = _orderedGroups().where(
+                (item) =>
+                    '${item.images.first.group}|${item.images.first.task}|${item.images.first.listName}' ==
+                    value,
+              );
+              if (chosen.isEmpty) {
+                return;
+              }
+              final first = chosen.first.images.first;
+              setState(() {
+                _orderedGroup = first.group;
+                _orderedTask = first.task;
+                _orderedList = first.listName;
+              });
+            },
+          ),
+        DropdownButton<String>(
+          key: const Key('ordered-mode'),
+          isExpanded: true,
+          value: _ruleMode,
+          items: const [
+            DropdownMenuItem(value: 'sequential', child: Text('リストの順にN枚ずつ')),
+            DropdownMenuItem(value: 'explicit', child: Text('枠ごとに番号')),
+          ],
+          onChanged: (value) {
+            if (value == null) {
+              return;
+            }
+            setState(() => _ruleMode = value);
+          },
+        ),
+        TextField(
+          key: const Key('ordered-offset'),
+          controller: _ruleOffset,
+          decoration: const InputDecoration(labelText: '開始番号', isDense: true),
+        ),
+        TextField(
+          key: const Key('ordered-stride'),
+          controller: _ruleStride,
+          decoration: const InputDecoration(labelText: '次のスライドへ進む数', isDense: true),
+        ),
+        if (_ruleMode == 'sequential')
+          TextField(
+            key: const Key('ordered-per-slide'),
+            controller: _rulePerSlide,
+            decoration: const InputDecoration(labelText: '1スライドの枚数', isDense: true),
+          ),
+        if (_ruleMode == 'explicit')
+          TextField(
+            key: const Key('ordered-numbers'),
+            controller: _ruleNumbers,
+            decoration: const InputDecoration(
+              labelText: '枠ごとの番号',
+              helperText: '左の枠から順に、1,4 のように書きます',
+              isDense: true,
+            ),
+          ),
+        Wrap(
+          spacing: 8,
+          children: [
+            TextButton(
+              key: const Key('ordered-save-rule'),
+              onPressed: _saving ? null : _onSaveAssignmentRule,
+              child: const Text('ルールを保存'),
+            ),
+            TextButton(
+              key: const Key('ordered-propose'),
+              onPressed: _saving || image == null ? null : () => _onProposeOrdered(image),
+              child: const Text('候補を作る'),
+            ),
+            TextButton(
+              key: const Key('ordered-accept-all'),
+              onPressed: _saving || !_orderedCandidates.any((item) => item.status == 'ready')
+                  ? null
+                  : () => _onAcceptOrdered(image),
+              child: const Text('候補をすべて採用'),
+            ),
+          ],
+        ),
+        for (final warning in _orderedWarnings)
+          Text(warning, key: Key('ordered-warning:$warning')),
+        for (final candidate in _orderedCandidates)
+          Row(
+            children: [
+              Expanded(
+                child: Text(
+                  '${candidate.label} スライド${candidate.slideOrdinal + 1} 枠${candidate.frameIndex + 1} '
+                  '#${candidate.itemNumber} ${candidate.assetName} ${candidate.reason}',
+                  key: Key('ordered-line:${candidate.key}'),
+                ),
+              ),
+              if (candidate.status == 'ready')
+                TextButton(
+                  key: Key('ordered-accept:${candidate.key}'),
+                  onPressed: _saving || image == null
+                      ? null
+                      : () => _onAcceptOrdered(
+                            image,
+                            ordinal: candidate.slideOrdinal,
+                            frame: candidate.frameIndex,
+                          ),
+                  child: const Text('この候補を採用'),
+                ),
+            ],
+          ),
+      ],
+    );
+  }
+
+  Future<void> _onRegisterLibraryList() async {
+    final records = <Map<String, Object?>>[];
+    for (final source in _librarySources) {
+      if (source.kind != LibrarySourceKind.vtv && source.kind != LibrarySourceKind.taskFile) {
+        continue;
+      }
+      for (final group in source.groups) {
+        for (final image in group.images) {
+          if (image.listIndex == null) {
+            continue;
+          }
+          final path = image.filePath ?? await _materializeLibraryImage(image);
+          if (!mounted || path == null) {
+            return;
+          }
+          records.add({
+            'path': path,
+            'source': image.source,
+            'group': image.group,
+            'task': image.task,
+            'listName': image.listName,
+            'listComment': image.listComment,
+            'listIndex': image.listIndex,
+          });
+        }
+      }
+    }
+    if (records.isEmpty) {
+      setState(() => _error = 'VTVかタスクファイルの一覧を読み込んでから登録してください');
+      return;
+    }
+    await _runProjectCommand(
+      '一覧を素材にしています',
+      (python, projectPath, layoutPath, pptxPath) => registerOrderedAssets(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        payload: jsonEncode(records),
+      ),
+      '並びを素材に残しました。枠へはまだ入れていません。',
+    );
+  }
+
+  Map<String, Object> _rulePayload(LayoutResult? result) {
+    final frames = [
+      for (final element in result?.elements ?? const <PlacedElement>[])
+        if (element.kind == 'image_frame' && element.fitMode == 'contain') element,
+    ];
+    final numbers = [
+      for (final part in _ruleNumbers.text.split(','))
+        int.tryParse(part.trim()) ?? 0,
+    ];
+    return {
+      'mode': _ruleMode,
+      'offset': int.tryParse(_ruleOffset.text.trim()) ?? 1,
+      'stride': int.tryParse(_ruleStride.text.trim()) ?? 1,
+      'perSlide': int.tryParse(_rulePerSlide.text.trim()) ?? frames.length,
+      'mappings': [
+        for (var index = 0; index < frames.length && index < numbers.length; index++)
+          if (numbers[index] > 0)
+            {'elementId': frames[index].elementId, 'itemNumber': numbers[index]},
+      ],
+    };
+  }
+
+  Future<void> _onSaveAssignmentRule() async {
+    await _runProjectCommand(
+      '割付ルールを保存しています',
+      (python, projectPath, layoutPath, pptxPath) => saveAssignmentRule(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        payload: jsonEncode(_rulePayload(_result)),
+      ),
+      '割付ルールをマスターに保存しました。枠へはまだ入れていません。',
+    );
+  }
+
+  Future<void> _onProposeOrdered(LibraryImage image) async {
+    final layoutPath = _path.text.trim();
+    final projectPath = projectPathForLayout(layoutPath);
+    final python = pythonExecutableNearLayout(layoutPath);
+    if (projectPath == null || python == null) {
+      setState(() => _error = 'Python が見つからないため、割付候補を作れません');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+      _orderedGroup = image.group;
+      _orderedTask = image.task;
+      _orderedList = image.listName;
+    });
+    try {
+      final proposal = await proposeOrderedAssignment(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        group: image.group,
+        task: image.task,
+        listName: image.listName,
+      );
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _orderedCandidates = proposal.candidates;
+        _orderedWarnings = proposal.warnings;
+        _status = '候補を作りました。採用するまで枠は変わりません。';
+      });
+    } on FormatException catch (error) {
+      if (mounted) {
+        setState(() => _error = error.message);
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _saving = false);
+      }
+    }
+  }
+
+  Future<void> _onAcceptOrdered(LibraryImage? image, {int? ordinal, int? frame}) async {
+    if (image == null) {
+      return;
+    }
+    await _runProjectCommand(
+      '割付候補を採用しています',
+      (python, projectPath, layoutPath, pptxPath) => acceptOrderedAssignment(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        group: image.group,
+        task: image.task,
+        listName: image.listName,
+        ordinal: ordinal,
+        frame: frame,
+      ),
+      ordinal == null ? '候補を採用しました。未割当の番号はそのままです。' : '選んだ候補を採用しました。',
+    );
   }
 
   Widget _assignmentCandidates() {

@@ -12,7 +12,9 @@ from typing import Any, Literal, Union
 import uuid
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+READABLE_SCHEMA_VERSIONS = {1, 2}
+LAYOUT_SCHEMA_VERSION = 1
 
 SLIDE_WIDTH_PT = 960.0
 SLIDE_HEIGHT_PT = 540.0
@@ -147,6 +149,25 @@ class DesignMaster:
 
 
 @dataclass
+class FrameMapping:
+    """テンプレートの画像枠と、リスト上の番号。番号は1始まり。"""
+
+    element_id: str
+    item_number: int
+
+
+@dataclass
+class AssignmentRule:
+    """マスターに保存する割付ルール。候補を出すだけで、割当は書かない。"""
+
+    mode: str
+    offset: int = 1
+    stride: int = 1
+    per_slide: int = 2
+    mappings: list[FrameMapping] = field(default_factory=list)
+
+
+@dataclass
 class ContentMaster:
     id: str
     design_master_id: str
@@ -154,6 +175,7 @@ class ContentMaster:
     root: Element
     schema_version: int = SCHEMA_VERSION
     master_rois: list[MasterRoi] = field(default_factory=list)
+    assignment_rule: AssignmentRule | None = None
 
 
 @dataclass
@@ -164,6 +186,12 @@ class Asset:
     height_px: int
     display_name: str
     kind: Literal["image"] = "image"
+    source: str | None = None
+    group: str | None = None
+    task: str | None = None
+    list_name: str | None = None
+    list_comment: str | None = None
+    list_index: int | None = None
 
 
 @dataclass
@@ -311,7 +339,7 @@ class LayoutResult:
     slide_height_pt: float
     elements: list[PlacedElement]
     violations: list[LayoutViolation]
-    schema_version: int = SCHEMA_VERSION
+    schema_version: int = LAYOUT_SCHEMA_VERSION
     preview_mode: str = "provisional"
     template_path: str | None = None
     chrome_image: str | None = None
@@ -371,7 +399,7 @@ def layout_result_to_dict(result: LayoutResult) -> dict[str, Any]:
 
 def layout_result_from_dict(data: dict[str, Any]) -> LayoutResult:
     version = _required(data, "schemaVersion")
-    if version != SCHEMA_VERSION:
+    if version != LAYOUT_SCHEMA_VERSION:
         raise ValueError(f"unsupported schemaVersion: {version}")
     elements = [_placed_from_dict(item) for item in _required(data, "elements")]
     stored_mode = data.get("previewMode")
@@ -478,9 +506,7 @@ def _optional_point(data: dict[str, Any], key: str) -> Point | None:
 
 
 def project_from_dict(data: dict[str, Any]) -> Project:
-    version = _required(data, "schemaVersion")
-    if version != SCHEMA_VERSION:
-        raise ValueError(f"unsupported schemaVersion: {version}")
+    version = _accept_schema(_required(data, "schemaVersion"))
     content_master = _content_from_dict(_required(data, "contentMaster"))
     slide = _slide_from_dict(_required(data, "slide"))
     layouts = [_layout_from_dict(item) for item in data.get("layouts", [])]
@@ -614,7 +640,7 @@ def _design_from_dict(data: dict[str, Any]) -> DesignMaster:
     title_frame = data.get("titleFrame")
     return DesignMaster(
         id=str(_required(data, "id")),
-        schema_version=int(data["schemaVersion"]),
+        schema_version=SCHEMA_VERSION,
         slide_width_pt=float(_required(data, "slideWidthPt")),
         slide_height_pt=float(_required(data, "slideHeightPt")),
         margin_pt=float(_required(data, "marginPt")),
@@ -641,6 +667,8 @@ def _content_to_dict(master: ContentMaster) -> dict[str, Any]:
     }
     if master.master_rois:
         payload["masterRois"] = [_master_roi_to_dict(item) for item in master.master_rois]
+    if master.assignment_rule is not None:
+        payload["assignmentRule"] = _rule_to_dict(master.assignment_rule)
     return payload
 
 
@@ -649,16 +677,17 @@ def _content_from_dict(data: dict[str, Any]) -> ContentMaster:
     masters = data.get("masterRois", [])
     return ContentMaster(
         id=str(_required(data, "id")),
-        schema_version=int(data["schemaVersion"]),
+        schema_version=SCHEMA_VERSION,
         design_master_id=str(_required(data, "designMasterId")),
         name=str(_required(data, "name")),
         root=_element_from_dict(_required(data, "root")),
         master_rois=[_master_roi_from_dict(item) for item in masters],
+        assignment_rule=_rule_from_dict(data.get("assignmentRule")),
     )
 
 
 def _asset_to_dict(asset: Asset) -> dict[str, Any]:
-    return {
+    payload = {
         "id": asset.id,
         "kind": asset.kind,
         "path": asset.path,
@@ -666,6 +695,14 @@ def _asset_to_dict(asset: Asset) -> dict[str, Any]:
         "heightPx": asset.height_px,
         "displayName": asset.display_name,
     }
+    _put_optional(payload, "source", asset.source)
+    _put_optional(payload, "group", asset.group)
+    _put_optional(payload, "task", asset.task)
+    _put_optional(payload, "listName", asset.list_name)
+    _put_optional(payload, "listComment", asset.list_comment)
+    if asset.list_index is not None:
+        payload["listIndex"] = asset.list_index
+    return payload
 
 
 def _asset_from_dict(data: dict[str, Any]) -> Asset:
@@ -679,6 +716,12 @@ def _asset_from_dict(data: dict[str, Any]) -> Asset:
         width_px=int(_required(data, "widthPx")),
         height_px=int(_required(data, "heightPx")),
         display_name=str(_required(data, "displayName")),
+        source=_optional_str(data, "source"),
+        group=_optional_str(data, "group"),
+        task=_optional_str(data, "task"),
+        list_name=_optional_str(data, "list_name") if "list_name" in data else _optional_str(data, "listName"),
+        list_comment=_optional_str(data, "listComment"),
+        list_index=None if data.get("listIndex") is None else int(data["listIndex"]),
     )
 
 
@@ -933,10 +976,50 @@ def _optional_str(data: dict[str, Any], key: str) -> str | None:
     return str(value)
 
 
-def _check_schema(data: dict[str, Any]) -> None:
-    version = _required(data, "schemaVersion")
-    if version != SCHEMA_VERSION:
+def _accept_schema(version: Any) -> int:
+    if version not in READABLE_SCHEMA_VERSIONS:
         raise ValueError(f"unsupported schemaVersion: {version}")
+    return SCHEMA_VERSION
+
+
+def _rule_to_dict(rule: AssignmentRule) -> dict[str, Any]:
+    return {
+        "mode": rule.mode,
+        "offset": rule.offset,
+        "stride": rule.stride,
+        "perSlide": rule.per_slide,
+        "mappings": [
+            {"elementId": item.element_id, "itemNumber": item.item_number} for item in rule.mappings
+        ],
+    }
+
+
+def _rule_from_dict(data: Any) -> AssignmentRule | None:
+    if data is None:
+        return None
+    if not isinstance(data, dict):
+        raise ValueError("割付ルールがオブジェクトではない")
+    mappings: list[FrameMapping] = []
+    for item in data.get("mappings", []):
+        if not isinstance(item, dict):
+            raise ValueError("割付ルールの枠がオブジェクトではない")
+        mappings.append(
+            FrameMapping(
+                element_id=str(_required(item, "elementId")),
+                item_number=int(_required(item, "itemNumber")),
+            )
+        )
+    return AssignmentRule(
+        mode=str(_required(data, "mode")),
+        offset=int(data.get("offset", 1)),
+        stride=int(data.get("stride", 1)),
+        per_slide=int(data.get("perSlide", 2)),
+        mappings=mappings,
+    )
+
+
+def _check_schema(data: dict[str, Any]) -> None:
+    _accept_schema(_required(data, "schemaVersion"))
 
 
 def _required(data: dict[str, Any], key: str) -> Any:
