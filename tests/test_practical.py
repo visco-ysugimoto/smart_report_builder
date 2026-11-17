@@ -1,0 +1,461 @@
+from pathlib import Path
+
+import pytest
+from PIL import Image
+from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
+
+from smart_report_builder.demo import (
+    DEFAULT_CAPTION,
+    FRAME_COMPARE_ID,
+    FRAME_OVERALL_ID,
+    ROI_ID,
+    ZOOM_FRAME_ID,
+    build_roi_project,
+    build_two_image_project,
+)
+from smart_report_builder.layout import layout_slide
+from smart_report_builder.models import (
+    Asset,
+    Binding,
+    GridNode,
+    ImageFrameNode,
+    Inheritance,
+    Roi,
+    TextNode,
+    project_from_dict,
+    project_to_dict,
+)
+from smart_report_builder.practical import (
+    add_measurement_table,
+    apply_assignment_candidate,
+    apply_master_roi,
+    apply_variant,
+    assignment_candidates,
+    capture_master_roi,
+    propose_variants,
+    set_table_cell,
+    update_master_roi,
+    add_dataset_asset,
+    add_image_frame,
+    add_table_column,
+    add_table_row,
+    create_dataset,
+    remove_dataset_asset,
+    remove_image_frame,
+    set_image_frame_kind,
+)
+from smart_report_builder.project_factory import create_report
+from smart_report_builder.project_store import load_project, save_project
+from smart_report_builder.pptx_writer import write_pptx
+from smart_report_builder.roi_edit import (
+    apply_normalized_roi,
+    arrange_roi_zooms,
+    main,
+    remove_unused_asset,
+)
+
+
+def test_assignment_candidates_wait_for_a_choice(tmp_path: Path):
+    overall = _png(tmp_path / "overall.png", (800, 400))
+    project = build_two_image_project(overall, tmp_path / "comparison.png")
+    project.slide.bindings = []
+    ready = [item for item in assignment_candidates(project) if item.status == "ready"]
+    assert [(item.element_id, item.asset_id) for item in ready] == [(FRAME_OVERALL_ID, "asset-overall"), (FRAME_COMPARE_ID, "asset-compare")]
+    before = [item.asset_id for item in project.slide.bindings]
+    assert before == []
+    apply_assignment_candidate(project, FRAME_OVERALL_ID, "asset-overall")
+    assert project.slide.bindings == [Binding(element_id=FRAME_OVERALL_ID, asset_id="asset-overall")]
+    with pytest.raises(ValueError, match="候補にありません"):
+        apply_assignment_candidate(project, FRAME_COMPARE_ID, "missing-asset")
+
+
+def test_partial_names_stay_unconfirmed():
+    project = build_two_image_project()
+    project.slide.bindings = []
+    project.assets[0].display_name = "全体画像"
+    project.assets.append(
+        Asset(id="asset-extra", path="overall-copy.png", width_px=10, height_px=10, display_name="全体画像")
+    )
+    confirm = [
+        item
+        for item in assignment_candidates(project)
+        if item.element_id == FRAME_OVERALL_ID and item.status == "confirm"
+    ]
+    assert {item.asset_id for item in confirm} == {"asset-overall", "asset-extra"}
+    assert project.slide.bindings == []
+
+
+def test_overflow_offers_at_most_three_variants_until_one_is_chosen():
+    project = create_report(image_count=2, arrangement="vertical")
+    project.assets = [
+        Asset(id="asset-a", path="a.png", width_px=800, height_px=400, display_name="広い"),
+        Asset(id="asset-b", path="b.png", width_px=400, height_px=800, display_name="高い"),
+    ]
+    project.slide.bindings = [
+        Binding(element_id="frame-overall", asset_id="asset-a"),
+        Binding(element_id="frame-compare", asset_id="asset-b"),
+    ]
+    caption = project.content_master.root.children[1]
+    assert isinstance(caption, TextNode)
+    caption.height_pt = 400
+    proposals = propose_variants(project)
+    assert proposals[0].variant_id == "standard"
+    assert proposals[0].selected is True
+    assert 1 < len(proposals) <= 3
+    assert project.content_master.root.children[0].direction.value == "vertical"
+    apply_variant(project, "equal")
+    assert project.content_master.root.children[0].track_aspect is False
+    heights = [item.frame.height for item in layout_slide(project).elements[:2]]
+    assert heights[0] == pytest.approx(heights[1])
+
+
+def test_master_roi_inheritance_and_batch_keep_corrections(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    project = build_roi_project(image, (800, 400))
+    master_id = capture_master_roi(project, ROI_ID)
+    update_master_roi(project, master_id, 0.3, 0.2, 0.2, 0.6)
+    inherited = layout_slide(project)
+    roi = next(item for item in inherited.elements if item.element_id == ROI_ID)
+    stored = project.slide.rois[0]
+    assert stored.x == pytest.approx(0.1)
+    assert stored.inheritance == Inheritance.INHERIT
+    assert roi.crop.x == pytest.approx(0.3)
+
+    apply_normalized_roi(project, ROI_ID, 0.4, 0.2, 0.2, 0.6)
+    assert stored.inheritance == Inheritance.RELATIVE
+    assert stored.dx == pytest.approx(0.1)
+    update_master_roi(project, master_id, 0.2, 0.2, 0.2, 0.6)
+    moved = layout_slide(project)
+    placed = next(item for item in moved.elements if item.element_id == ROI_ID)
+    assert placed.crop.x == pytest.approx(0.3)
+
+    two = build_two_image_project(image, tmp_path / "comparison.png")
+    two.slide.rois = project.slide.rois
+    two.content_master.master_rois = project.content_master.master_rois
+    applied, skipped = apply_master_roi(two, master_id, [FRAME_OVERALL_ID, FRAME_COMPARE_ID])
+    assert applied == 1
+    assert skipped == 1
+    copied = next(item for item in two.slide.rois if item.source_element_id == FRAME_COMPARE_ID)
+    assert copied.inheritance == Inheritance.INHERIT
+    copied.inheritance = Inheritance.DETACHED
+    again, protected = apply_master_roi(two, master_id, [FRAME_COMPARE_ID])
+    assert (again, protected) == (0, 1)
+    assert copied.inheritance == Inheritance.DETACHED
+
+
+def test_table_keeps_cell_text_and_exports_a_native_table(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    _png(tmp_path / "comparison.png", (400, 800))
+    project = build_two_image_project(image, tmp_path / "comparison.png")
+    table_id = add_measurement_table(project)
+    long_text = "測定値は短縮してはいけません。"
+    set_table_cell(project, table_id, 1, 1, long_text)
+    set_table_cell(project, table_id, 0, 0, "  項目全文  ")
+    result = layout_slide(project)
+    table = next(item for item in result.elements if item.element_id == table_id)
+    assert table.kind == "table"
+    assert table.table_rows[1][1] == long_text
+    assert table.table_rows[0][0] == "  項目全文  "
+    caption = next(item for item in result.elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    destination = tmp_path / "report.pptx"
+    write_pptx(result, destination)
+    shapes = list(Presentation(destination).slides[0].shapes)
+    tables = [shape for shape in shapes if shape.shape_type == MSO_SHAPE_TYPE.TABLE]
+    assert len(tables) == 1
+    assert tables[0].table.cell(1, 1).text == long_text
+    assert tables[0].table.cell(0, 0).text == "  項目全文  "
+
+
+def test_add_table_row_keeps_existing_cells(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    _png(tmp_path / "comparison.png", (400, 800))
+    project = build_two_image_project(image, tmp_path / "comparison.png")
+    table_id = add_measurement_table(project)
+    long_text = "測定値は短縮してはいけません。"
+    set_table_cell(project, table_id, 1, 1, long_text)
+    before = layout_slide(project)
+    before_table = next(item for item in before.elements if item.element_id == table_id)
+    row_index = add_table_row(project, table_id)
+    assert row_index == 2
+    result = layout_slide(project)
+    table = next(item for item in result.elements if item.element_id == table_id)
+    assert table.table_rows == [["項目", "値"], ["結果", long_text], ["", ""]]
+    assert table.frame.height == pytest.approx(before_table.frame.height + 36)
+    caption = next(item for item in result.elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    images = [item for item in result.elements if item.kind == "image_frame"]
+    assert len(images) == len([item for item in before.elements if item.kind == "image_frame"])
+    with pytest.raises(ValueError, match="表が見つからない"):
+        add_table_row(project, "missing-table")
+    destination = tmp_path / "report.pptx"
+    write_pptx(result, destination)
+    exported = next(shape for shape in Presentation(destination).slides[0].shapes if shape.shape_type == MSO_SHAPE_TYPE.TABLE)
+    assert exported.table.cell(1, 1).text == long_text
+    assert exported.table.cell(2, 0).text == ""
+    assert exported.table.cell(2, 1).text == ""
+
+
+def test_add_table_column_keeps_existing_cells_and_the_frame(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    _png(tmp_path / "comparison.png", (400, 800))
+    project = build_two_image_project(image, tmp_path / "comparison.png")
+    table_id = add_measurement_table(project)
+    long_text = "測定値は短縮してはいけません。"
+    set_table_cell(project, table_id, 1, 1, long_text)
+    before = layout_slide(project)
+    before_table = next(item for item in before.elements if item.element_id == table_id)
+    column_index = add_table_column(project, table_id)
+    assert column_index == 2
+    result = layout_slide(project)
+    table = next(item for item in result.elements if item.element_id == table_id)
+    assert table.table_rows == [["項目", "値", ""], ["結果", long_text, ""]]
+    assert table.frame == before_table.frame
+    caption = next(item for item in result.elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    with pytest.raises(ValueError, match="表が見つからない"):
+        add_table_column(project, "missing-table")
+    destination = tmp_path / "report.pptx"
+    write_pptx(result, destination)
+    exported = next(shape for shape in Presentation(destination).slides[0].shapes if shape.shape_type == MSO_SHAPE_TYPE.TABLE)
+    assert exported.table.cell(1, 1).text == long_text
+    assert exported.table.cell(0, 2).text == ""
+    assert exported.table.cell(1, 2).text == ""
+
+
+def test_add_image_frame_keeps_the_caption_and_existing_assets(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    _png(tmp_path / "comparison.png", (400, 800))
+    project = build_two_image_project(image, tmp_path / "comparison.png")
+    before = layout_slide(project)
+    before_caption = next(item for item in before.elements if item.kind == "text")
+    bindings = list(project.slide.bindings)
+    assets = [(item.id, item.path) for item in project.assets]
+    assert add_image_frame(project) == "frame-1"
+    assert add_image_frame(project) == "frame-2"
+    result = layout_slide(project)
+    added = next(item for item in result.elements if item.element_id == "frame-1")
+    assert added.display_name == "画像1"
+    assert added.role_id == "image"
+    assert added.fit_mode == "contain"
+    assert added.asset_path is None
+    caption = next(item for item in result.elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    assert caption.frame == before_caption.frame
+    assert [(item.id, item.path) for item in project.assets] == assets
+    assert project.slide.bindings == bindings
+    assert {item.element_id for item in result.elements if item.kind == "image_frame"} == {
+        "frame-overall",
+        "frame-compare",
+        "frame-1",
+        "frame-2",
+    }
+    destination = tmp_path / "report.pptx"
+    write_pptx(result, destination)
+    pictures = [shape for shape in Presentation(destination).slides[0].shapes if shape.shape_type == MSO_SHAPE_TYPE.PICTURE]
+    assert len(pictures) == 2
+    grid = create_report(image_count=2, arrangement="grid")
+    add_image_frame(grid)
+    container = grid.content_master.root.children[0]
+    assert isinstance(container, GridNode)
+    assert container.columns == 2
+    bare = create_report()
+    bare.content_master.root = TextNode(
+        id="text-caption",
+        role_id="caption",
+        display_name="説明",
+        text=DEFAULT_CAPTION,
+    )
+    with pytest.raises(ValueError, match="画像枠を追加できません"):
+        add_image_frame(bare)
+
+
+def test_remove_contain_frame_keeps_the_file_zoom_frame_and_caption(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    project = build_roi_project(image)
+    before = layout_slide(project)
+    before_caption = next(item for item in before.elements if item.kind == "text")
+    remove_image_frame(project, FRAME_OVERALL_ID)
+    result = layout_slide(project)
+    ids = {item.element_id for item in result.elements}
+    assert FRAME_OVERALL_ID not in ids
+    assert ZOOM_FRAME_ID in ids
+    assert project.slide.rois == []
+    assert any(asset.id == "asset-overall" for asset in project.assets)
+    assert image.exists()
+    caption = next(item for item in result.elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    assert caption.frame == before_caption.frame
+    remove_image_frame(project, ZOOM_FRAME_ID)
+    assert all(item.element_id != ZOOM_FRAME_ID for item in layout_slide(project).elements)
+    assert image.exists()
+    two = build_two_image_project(image, tmp_path / "comparison.png")
+    _png(tmp_path / "comparison.png", (400, 800))
+    remove_image_frame(two, FRAME_OVERALL_ID)
+    remove_image_frame(two, FRAME_COMPARE_ID)
+    assert add_image_frame(two) == "frame-1"
+    assert any(asset.id == "asset-compare" for asset in two.assets)
+
+
+def test_remove_zoom_frame_keeps_the_roi_rectangle_and_the_file(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    project = build_roi_project(image)
+    project.slide.rois.append(
+        Roi(
+            id="roi-2",
+            name="ROI 2",
+            source_element_id=FRAME_OVERALL_ID,
+            x=0.5,
+            y=0.1,
+            width=0.2,
+            height=0.3,
+        )
+    )
+    arrange_roi_zooms(project, "horizontal")
+    rectangles = [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois]
+    first, second = (roi.zoom_element_id for roi in project.slide.rois)
+
+    remove_image_frame(project, first)
+    assert [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois] == rectangles
+    assert project.slide.rois[0].zoom_element_id is None
+    assert project.slide.rois[1].zoom_element_id == second
+    assert image.exists()
+    assert any(asset.id == "asset-overall" for asset in project.assets)
+    assert any(item.element_id == FRAME_OVERALL_ID for item in layout_slide(project).elements)
+    assert all(item.element_id != first for item in layout_slide(project).elements)
+
+    remove_image_frame(project, second)
+    assert [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois] == rectangles
+    assert project.slide.rois[1].zoom_element_id is None
+    assert all(child.id not in {"stack-zooms", "grid-zooms"} for child in project.content_master.root.children)
+
+
+def test_dataset_groups_assets_without_assigning_or_deleting_files(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    extra = _png(tmp_path / "extra.png", (32, 16))
+    project = build_two_image_project(image, tmp_path / "comparison.png")
+    _png(tmp_path / "comparison.png", (400, 800))
+    project.assets.append(
+        Asset(id="asset-1", path=str(extra), width_px=32, height_px=16, display_name="extra")
+    )
+    assert "datasets" not in project_to_dict(project)
+    bindings = list(project.slide.bindings)
+    dataset_id = create_dataset(project, "  対象Aの全文  ", ["asset-overall", "asset-overall", "asset-1"])
+    assert dataset_id == "dataset-1"
+    assert project.datasets[0].name == "対象Aの全文"
+    assert project.datasets[0].asset_ids == ["asset-overall", "asset-1"]
+    assert project.slide.bindings == bindings
+    restored = project_from_dict(project_to_dict(project))
+    assert restored.datasets[0].asset_ids == ["asset-overall", "asset-1"]
+    with pytest.raises(ValueError, match="すでにそのグループに入っています"):
+        add_dataset_asset(project, dataset_id, "asset-1")
+    add_dataset_asset(project, dataset_id, "asset-compare")
+    remove_dataset_asset(project, dataset_id, "asset-compare")
+    assert project.datasets[0].asset_ids == ["asset-overall", "asset-1"]
+    remove_unused_asset(project, "asset-1")
+    assert project.datasets[0].asset_ids == ["asset-overall"]
+    assert extra.exists()
+    assert any(asset.id == "asset-overall" for asset in project.assets)
+    caption = next(item for item in layout_slide(project).elements if item.kind == "text")
+    assert caption.text == DEFAULT_CAPTION
+    with pytest.raises(ValueError, match="グループ名が空です"):
+        create_dataset(project, "   ", ["asset-overall"])
+    with pytest.raises(ValueError, match="素材が見つからない"):
+        create_dataset(project, "予備", ["missing-asset"])
+
+
+def test_history_undoes_and_redoes_more_than_one_edit(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    project_path = tmp_path / "sample_roi.project.json"
+    save_project(build_roi_project(image, (800, 400)), project_path)
+    assert main([str(project_path), ROI_ID, "0.20", "0.20", "0.20", "0.20"]) == 0
+    assert main([str(project_path), ROI_ID, "0.30", "0.20", "0.20", "0.20"]) == 0
+    assert main([str(project_path), ROI_ID, "0.40", "0.20", "0.20", "0.20"]) == 0
+    assert load_project(project_path).slide.rois[0].x == pytest.approx(0.40)
+    assert main(["undo", str(project_path)]) == 0
+    assert load_project(project_path).slide.rois[0].x == pytest.approx(0.30)
+    assert main(["undo", str(project_path)]) == 0
+    assert load_project(project_path).slide.rois[0].x == pytest.approx(0.20)
+    assert main(["undo", str(project_path)]) == 0
+    assert load_project(project_path).slide.rois[0].x == pytest.approx(0.10)
+    assert main(["undo", str(project_path)]) == 1
+    assert main(["redo", str(project_path)]) == 0
+    assert main(["redo", str(project_path)]) == 0
+    assert main(["redo", str(project_path)]) == 0
+    assert load_project(project_path).slide.rois[0].x == pytest.approx(0.40)
+    assert main(["redo", str(project_path)]) == 1
+
+
+def test_set_image_frame_kind_switches_between_picture_and_zoom(tmp_path: Path):
+    image = _png(tmp_path / "overall.png", (800, 400))
+    project = build_roi_project(image)
+    project.slide.rois.append(
+        Roi(
+            id="roi-2",
+            name="ROI 2",
+            source_element_id=FRAME_OVERALL_ID,
+            x=0.5,
+            y=0.1,
+            width=0.2,
+            height=0.3,
+        )
+    )
+    bindings = list(project.slide.bindings)
+    rectangles = [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois]
+
+    assert set_image_frame_kind(project, FRAME_OVERALL_ID, "zoom") == FRAME_OVERALL_ID
+    overall = _frame(project, FRAME_OVERALL_ID)
+    assert overall.role_id == "zoom"
+    assert overall.fit_mode.value == "roi"
+    assert overall.display_name == "拡大画像2"
+    assert project.slide.bindings == bindings
+    assert project.slide.rois == []
+    placed = next(item for item in layout_slide(project).elements if item.element_id == FRAME_OVERALL_ID)
+    assert placed.fit_mode == "roi"
+    assert placed.asset_path is None
+    overall.display_name = "手入力"
+    set_image_frame_kind(project, FRAME_OVERALL_ID, "zoom")
+    assert overall.display_name == "手入力"
+
+    assert set_image_frame_kind(project, ZOOM_FRAME_ID, "image") == ZOOM_FRAME_ID
+    zoom = _frame(project, ZOOM_FRAME_ID)
+    assert zoom.role_id == "image"
+    assert zoom.fit_mode.value == "contain"
+    assert zoom.display_name == "画像"
+    assert project.slide.rois == []
+
+    project = build_roi_project(image)
+    assert set_image_frame_kind(project, ZOOM_FRAME_ID, "comparison") == ZOOM_FRAME_ID
+    changed = _frame(project, ZOOM_FRAME_ID)
+    assert changed.role_id == "comparison"
+    assert changed.fit_mode.value == "contain"
+    assert changed.display_name == "比較画像"
+    assert [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois] == rectangles[:1]
+    assert project.slide.rois[0].zoom_element_id is None
+    shown = next(item for item in layout_slide(project).elements if item.element_id == ZOOM_FRAME_ID)
+    assert shown.asset_path is None
+    with pytest.raises(ValueError, match="種類は"):
+        set_image_frame_kind(project, FRAME_OVERALL_ID, "cover")
+    with pytest.raises(ValueError, match="画像枠が見つからない"):
+        set_image_frame_kind(project, "missing", "image")
+
+
+def _frame(project, element_id: str) -> ImageFrameNode:
+    def walk(node):
+        if isinstance(node, ImageFrameNode) and node.id == element_id:
+            return node
+        for child in getattr(node, "children", []):
+            found = walk(child)
+            if found is not None:
+                return found
+        return None
+
+    found = walk(project.content_master.root)
+    assert found is not None
+    return found
+
+
+def _png(path: Path, size: tuple[int, int]) -> Path:
+    Image.new("RGB", size, (20, 40, 60)).save(path, format="PNG")
+    return path

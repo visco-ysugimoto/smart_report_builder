@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "smart-report-builder"
+version = "0.1.0"
+description = "Layout engine and editable PPTX export for Smart Report Builder"
+requires-python = ">=3.12"
+dependencies = [
+    "python-pptx>=1.0.2",
+    "Pillow>=10.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+smart_report_builder = ["templates/*.pptx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
