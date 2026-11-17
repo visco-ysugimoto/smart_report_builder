@@ -952,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
         return _set_table_cell_command(args[1:])
     if args and args[0] == "set-page-title":
         return _set_page_title_command(args[1:])
+    if args and args[0] == "set-finding":
+        return _set_finding_command(args[1:])
     if args and args[0] == "export-pptx":
         return _export_pptx(args[1:])
     if args and args[0] == "undo":
@@ -2474,6 +2476,27 @@ def _remove_dataset_asset_command(argv: list[str]) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print(f"detached {args.dataset_id} {args.asset_id}")
+    return 0
+
+
+def _set_finding_command(argv: list[str]) -> int:
+    from smart_report_builder.practical import set_slide_finding
+
+    parser = argparse.ArgumentParser(description="Set one slide's finding text without changing the master")
+    parser.add_argument("project")
+    parser.add_argument("--text", required=True)
+    parser.add_argument("--element")
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        element_id = set_slide_finding(project, args.text, args.element)
+        _save_outputs(project, args.project, args.layout, args.pptx)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(f"finding {element_id}")
     return 0
 
 

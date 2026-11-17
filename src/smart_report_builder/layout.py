@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+import unicodedata
+
 from smart_report_builder.fit import contain_rect, map_normalized_rect
 from smart_report_builder.models import (
     SCHEMA_VERSION,
@@ -848,6 +850,14 @@ def _annotate_geometry(
                     message="描画矩形が画像枠の外にはみ出している",
                 )
             )
+        if element.kind == "text" and _text_is_clipped(element.frame, element.text or ""):
+            violations.append(
+                LayoutViolation(
+                    code="text_overflow",
+                    element_id=element.element_id,
+                    message="文章が枠に入りきらないため、末尾が切れて見えることがあります。文章は省略していません",
+                )
+            )
     for index, left in enumerate(elements):
         for right in elements[index + 1 :]:
             if left.kind in _OVERLAY_KINDS or right.kind in _OVERLAY_KINDS:
@@ -860,6 +870,46 @@ def _annotate_geometry(
                         message=f"{left.element_id} と重なっている",
                     )
                 )
+
+
+_TEXT_FONT_PT = 16.0
+
+
+def _text_is_clipped(frame: Rect, text: str) -> bool:
+    """16pt・行高 1 の見積もり。文字は削らず、枠より多くなるときだけ真にする。"""
+    if not text or frame.width <= _EPS or frame.height <= _EPS:
+        return False
+    capacity = int(frame.height // _TEXT_FONT_PT)
+    if capacity < 1:
+        return True
+    needed = 0
+    for paragraph in text.split("\n"):
+        needed += _wrapped_lines(paragraph, frame.width)
+    return needed > capacity
+
+
+def _wrapped_lines(paragraph: str, width: float) -> int:
+    if paragraph == "":
+        return 1
+    lines = 1
+    used = 0.0
+    for char in paragraph:
+        advance = _char_width(char)
+        if used > 0 and used + advance > width + _EPS:
+            lines += 1
+            used = advance
+        else:
+            used += advance
+    return lines
+
+
+def _char_width(char: str) -> float:
+    if char == "\t":
+        return _TEXT_FONT_PT * 2
+    width = unicodedata.east_asian_width(char)
+    if width in {"F", "W", "A"}:
+        return _TEXT_FONT_PT
+    return _TEXT_FONT_PT * 0.5
 
 
 def _tight(rect: Rect) -> bool:

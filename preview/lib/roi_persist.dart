@@ -840,6 +840,34 @@ Future<void> openPptxPreview({
 }
 
 /// 撮像スライドのページタイトルを保存する。
+Future<void> setSlideFinding({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  required String elementId,
+  required String text,
+}) async {
+  final result = await runReportCommand(pythonExecutable, [
+    '-m',
+    'smart_report_builder.roi_edit',
+    'set-finding',
+    projectPath,
+    '--element',
+    elementId,
+    '--text',
+    text,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ]);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '見解を反映できません' : message);
+  }
+}
+
 Future<void> setReportPageTitle({
   required String pythonExecutable,
   required String projectPath,

@@ -98,6 +98,8 @@ class _PreviewHomeState extends State<PreviewHome> {
   String _newPaper = '16x9';
   final TextEditingController _pageTitle = TextEditingController();
   final FocusNode _pageTitleFocus = FocusNode();
+  final TextEditingController _finding = TextEditingController();
+  final FocusNode _findingFocus = FocusNode();
   List<ReportPage> _pages = [];
   List<ReportLayoutOption> _layouts = [];
   String? _activePageId;
@@ -130,6 +132,16 @@ class _PreviewHomeState extends State<PreviewHome> {
         _onSavePageTitle();
       }
     });
+    _findingFocus.addListener(() {
+      if (!_findingFocus.hasFocus) {
+        _onSaveFinding();
+      }
+    });
+    _finding.addListener(() {
+      if (mounted) {
+        setState(() {});
+      }
+    });
     _load();
   }
 
@@ -155,6 +167,8 @@ class _PreviewHomeState extends State<PreviewHome> {
     _taskNumber.dispose();
     _pageTitle.dispose();
     _pageTitleFocus.dispose();
+    _finding.dispose();
+    _findingFocus.dispose();
     reportSession.close();
     super.dispose();
   }
@@ -384,6 +398,7 @@ class _PreviewHomeState extends State<PreviewHome> {
       _applyRoiNoteField();
       _applyTableCellField(result);
       _applyPageTitle(result);
+      _applyFinding(result);
       if (!useMemory) {
         await _syncSession(filePath, ticket);
       }
@@ -2667,6 +2682,39 @@ class _PreviewHomeState extends State<PreviewHome> {
                 onSubmitted: (_) => _onSavePageTitle(),
               ),
             ],
+            if (_findingElement(result) != null) ...[
+              const SizedBox(height: 8),
+              TextField(
+                key: const Key('finding-text'),
+                controller: _finding,
+                focusNode: _findingFocus,
+                minLines: 3,
+                maxLines: 8,
+                decoration: const InputDecoration(
+                  labelText: 'このスライドの見解',
+                  border: OutlineInputBorder(),
+                  alignLabelWithHint: true,
+                  helperText: 'このスライドだけに保存します。長い文章は省略しません。欄の外か「見解を反映」でプレビューへ出します。',
+                ),
+              ),
+              if (_findingIsPending(result)) ...[
+                const SizedBox(height: 4),
+                const Text(
+                  'この見解はまだスライドに反映していません。',
+                  key: Key('finding-pending'),
+                ),
+              ],
+              Align(
+                alignment: Alignment.centerLeft,
+                child: FilledButton(
+                  key: const Key('finding-apply'),
+                  onPressed: _saving || !_findingIsPending(result)
+                      ? null
+                      : _onSaveFinding,
+                  child: const Text('見解を反映'),
+                ),
+              ),
+            ],
             const SizedBox(height: 8),
             Row(
               children: [
@@ -3669,6 +3717,65 @@ class _PreviewHomeState extends State<PreviewHome> {
       }
     }
     return null;
+  }
+
+  PlacedElement? _findingElement(LayoutResult? result) {
+    if (result == null) {
+      return null;
+    }
+    PlacedElement? fallback;
+    for (final element in result.elements) {
+      if (element.kind != 'text') {
+        continue;
+      }
+      if (element.roleId == 'caption') {
+        return element;
+      }
+      fallback ??= element;
+    }
+    return fallback;
+  }
+
+  bool _findingIsPending(LayoutResult? result) {
+    final element = _findingElement(result);
+    if (element == null) {
+      return false;
+    }
+    return _finding.text != (element.text ?? '');
+  }
+
+  void _applyFinding(LayoutResult result) {
+    if (_findingFocus.hasFocus) {
+      return;
+    }
+    final element = _findingElement(result);
+    if (element == null) {
+      return;
+    }
+    final text = element.text ?? '';
+    if (_finding.text != text) {
+      _finding.text = text;
+    }
+  }
+
+  Future<void> _onSaveFinding() async {
+    final element = _findingElement(_result);
+    if (element == null || _saving || !_findingIsPending(_result)) {
+      return;
+    }
+    final text = _finding.text;
+    await _runProjectCommand(
+      '見解を反映しています',
+      (python, projectPath, layoutPath, pptxPath) => setSlideFinding(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        elementId: element.elementId,
+        text: text,
+      ),
+      'このスライドの見解を反映しました。保存すると JSON と PPTX に残ります。',
+    );
   }
 
   void _applyPageTitle(LayoutResult result) {

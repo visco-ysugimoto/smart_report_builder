@@ -17,6 +17,7 @@ from smart_report_builder.models import (
     Dataset,
     FitMode,
     GridNode,
+    Binding,
     ImageFrameNode,
     Inheritance,
     MasterRoi,
@@ -26,6 +27,7 @@ from smart_report_builder.models import (
     StackDirection,
     StackNode,
     TableNode,
+    TextNode,
     project_from_dict,
     project_to_dict,
 )
@@ -665,6 +667,39 @@ def set_table_cell(project: Project, element_id: str, row: int, column: int, tex
         raise ValueError("表の列が見つからない")
     table.rows[body][column] = text
     return text
+
+
+def set_slide_finding(project: Project, text: str, element_id: str | None = None) -> str:
+    """このスライドの文章枠へ見解を書く。マスターの文章は変えない。
+
+    空文字もそのまま保存する。前後の空白や改行は削らない。
+    """
+    if not isinstance(text, str):
+        raise ValueError("見解が文字列ではない")
+    node = _finding_node(project, element_id)
+    matches = [item for item in project.slide.bindings if item.element_id == node.id]
+    if len(matches) > 1:
+        raise ValueError("この文章枠の割当が競合しているため変更しません")
+    if len(matches) == 1:
+        matches[0].text = text
+    else:
+        project.slide.bindings.append(Binding(element_id=node.id, text=text))
+    return node.id
+
+
+def _finding_node(project: Project, element_id: str | None) -> TextNode:
+    texts = [node for node in _walk(project.content_master.root) if isinstance(node, TextNode)]
+    if element_id is not None:
+        found = next((node for node in texts if node.id == element_id), None)
+        if found is None:
+            raise ValueError("見解を書く文章枠が見つからない")
+        return found
+    captions = [node for node in texts if node.role_id == "caption"]
+    if captions:
+        return captions[0]
+    if texts:
+        return texts[0]
+    raise ValueError("見解を書く文章枠がありません")
 
 
 def _label_for(status: str) -> str:
