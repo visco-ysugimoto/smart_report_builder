@@ -914,6 +914,8 @@ def main(argv: list[str] | None = None) -> int:
         return _register_ordered(args[1:])
     if args and args[0] == "set-assignment-rule":
         return _set_assignment_rule(args[1:])
+    if args and args[0] == "expand-assignment":
+        return _expand_assignment(args[1:])
     if args and args[0] == "propose-ordered":
         return _propose_ordered(args[1:])
     if args and args[0] == "accept-ordered":
@@ -2098,6 +2100,26 @@ def _set_assignment_rule(argv: list[str]) -> int:
         print(str(exc), file=sys.stderr)
         return 1
     print("rule")
+    return 0
+
+
+def _expand_assignment(argv: list[str]) -> int:
+    from smart_report_builder.ordered_assignment import expand_assignment, proposal_json, rule_from_payload
+
+    parser = argparse.ArgumentParser(description="Save a frame rule and return slide candidates")
+    parser.add_argument("project")
+    parser.add_argument("--payload", required=True)
+    parser.add_argument("--layout")
+    parser.add_argument("--pptx")
+    args = parser.parse_args(argv)
+    try:
+        project = load_project(args.project)
+        proposal = expand_assignment(project, rule_from_payload(json.loads(args.payload)))
+        _save_outputs(project, args.project, args.layout, args.pptx)
+    except (ValueError, json.JSONDecodeError, KeyError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    print(proposal_json(proposal))
     return 0
 
 

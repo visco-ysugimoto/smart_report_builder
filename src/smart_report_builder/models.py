@@ -150,21 +150,47 @@ class DesignMaster:
 
 @dataclass
 class FrameMapping:
-    """テンプレートの画像枠と、リスト上の番号。番号は1始まり。"""
+    """古いルールの枠と番号。読み込み時に FrameRef へ移す。"""
 
     element_id: str
     item_number: int
 
 
 @dataclass
-class AssignmentRule:
-    """マスターに保存する割付ルール。候補を出すだけで、割当は書かない。"""
+class FrameRef:
+    """1つの画像枠が参照するリストと番号。番号は1始まり。"""
 
-    mode: str
+    element_id: str
+    frame_index: int
+    list_by: str
+    list_key: str
+    item_number: int
+
+
+@dataclass
+class SlideOverride:
+    """繰り返しを使わない、そのスライドだけの参照。"""
+
+    slide_ordinal: int
+    frames: list[FrameRef] = field(default_factory=list)
+
+
+@dataclass
+class AssignmentRule:
+    """マスターに保存する割付ルール。候補を出すだけで、割当は書かない。
+
+    pattern が1枚分の枠参照。step を足しながら次のスライドへ広げる。
+    overrides はその番号のスライドだけを置き換える。
+    """
+
+    mode: str = "pattern"
     offset: int = 1
     stride: int = 1
     per_slide: int = 2
     mappings: list[FrameMapping] = field(default_factory=list)
+    step: int = 1
+    pattern: list[FrameRef] = field(default_factory=list)
+    overrides: list[SlideOverride] = field(default_factory=list)
 
 
 @dataclass
@@ -982,14 +1008,43 @@ def _accept_schema(version: Any) -> int:
     return SCHEMA_VERSION
 
 
+def _frame_ref_to_dict(ref: FrameRef) -> dict[str, Any]:
+    return {
+        "elementId": ref.element_id,
+        "frameIndex": ref.frame_index,
+        "listBy": ref.list_by,
+        "listKey": ref.list_key,
+        "itemNumber": ref.item_number,
+    }
+
+
+def _frame_ref_from_dict(data: dict[str, Any], index: int) -> FrameRef:
+    return FrameRef(
+        element_id=str(data.get("elementId") or ""),
+        frame_index=int(data.get("frameIndex", index)),
+        list_by=str(data.get("listBy") or "comment"),
+        list_key=str(data.get("listKey") or ""),
+        item_number=int(_required(data, "itemNumber")),
+    )
+
+
 def _rule_to_dict(rule: AssignmentRule) -> dict[str, Any]:
     return {
         "mode": rule.mode,
         "offset": rule.offset,
         "stride": rule.stride,
         "perSlide": rule.per_slide,
+        "step": rule.step,
         "mappings": [
             {"elementId": item.element_id, "itemNumber": item.item_number} for item in rule.mappings
+        ],
+        "pattern": [_frame_ref_to_dict(item) for item in rule.pattern],
+        "overrides": [
+            {
+                "slideOrdinal": item.slide_ordinal,
+                "frames": [_frame_ref_to_dict(ref) for ref in item.frames],
+            }
+            for item in rule.overrides
         ],
     }
 
@@ -1009,12 +1064,50 @@ def _rule_from_dict(data: Any) -> AssignmentRule | None:
                 item_number=int(_required(item, "itemNumber")),
             )
         )
+    pattern = [
+        _frame_ref_from_dict(item, index)
+        for index, item in enumerate(data.get("pattern") or [])
+        if isinstance(item, dict)
+    ]
+    overrides: list[SlideOverride] = []
+    for item in data.get("overrides") or []:
+        if not isinstance(item, dict):
+            continue
+        overrides.append(
+            SlideOverride(
+                slide_ordinal=int(item.get("slideOrdinal", 0)),
+                frames=[
+                    _frame_ref_from_dict(ref, index)
+                    for index, ref in enumerate(item.get("frames") or [])
+                    if isinstance(ref, dict)
+                ],
+            )
+        )
+    offset = int(data.get("offset", 1))
+    stride = int(data.get("stride", 1))
+    per_slide = int(data.get("perSlide", max(len(pattern), 1)))
+    mode = str(data.get("mode") or "pattern")
+    if not pattern:
+        if mode == "explicit" and mappings:
+            pattern = [
+                FrameRef(item.element_id, index, "position", "1", item.item_number)
+                for index, item in enumerate(mappings)
+            ]
+        else:
+            count = per_slide if per_slide > 0 else 1
+            pattern = [
+                FrameRef("", index, "position", "1", offset + index) for index in range(count)
+            ]
+        mode = "pattern"
     return AssignmentRule(
-        mode=str(_required(data, "mode")),
-        offset=int(data.get("offset", 1)),
-        stride=int(data.get("stride", 1)),
-        per_slide=int(data.get("perSlide", 2)),
+        mode=mode,
+        offset=offset,
+        stride=stride,
+        per_slide=per_slide,
         mappings=mappings,
+        step=int(data.get("step", stride)),
+        pattern=pattern,
+        overrides=overrides,
     )
 
 

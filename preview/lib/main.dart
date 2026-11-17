@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:smart_report_preview/image_library.dart';
 import 'package:smart_report_preview/image_library_panel.dart';
+import 'package:smart_report_preview/ordered_lists.dart';
 import 'package:smart_report_preview/layout_path.dart';
 import 'package:smart_report_preview/layout_result.dart';
 import 'package:smart_report_preview/roi_geometry.dart';
@@ -127,7 +128,10 @@ class _PreviewHomeState extends State<PreviewHome> {
   final TextEditingController _ruleStride = TextEditingController(text: '2');
   final TextEditingController _rulePerSlide = TextEditingController(text: '2');
   final TextEditingController _ruleNumbers = TextEditingController(text: '1,2');
-  String _ruleMode = 'sequential';
+  String _ruleMode = 'pattern';
+  bool _pinThisSlide = false;
+  final Map<String, TextEditingController> _frameItems = {};
+  final Map<String, String> _frameLists = {};
   String _orderedGroup = '';
   String _orderedTask = '';
   String _orderedList = '';
@@ -180,6 +184,9 @@ class _PreviewHomeState extends State<PreviewHome> {
     _ruleStride.dispose();
     _rulePerSlide.dispose();
     _ruleNumbers.dispose();
+    for (final controller in _frameItems.values) {
+      controller.dispose();
+    }
     _pageTitle.dispose();
     _pageTitleFocus.dispose();
     _finding.dispose();
@@ -4074,127 +4081,72 @@ class _PreviewHomeState extends State<PreviewHome> {
     return frameId;
   }
 
-  List<LibraryGroup> _orderedGroups() {
-    return [
-      for (final source in _librarySources)
-        if (source.kind == LibrarySourceKind.vtv || source.kind == LibrarySourceKind.taskFile)
-          for (final group in source.groups)
-            if (group.images.any((image) => image.listIndex != null)) group,
-    ];
+  int _activeOrdinal() {
+    if (_pages.isEmpty) {
+      return 0;
+    }
+    final index = _pages.indexWhere((page) => page.id == _activePageId);
+    return index < 0 ? 0 : index;
   }
 
-  LibraryGroup? _selectedOrderedGroup() {
-    final groups = _orderedGroups();
-    for (final group in groups) {
-      final image = group.images.first;
-      if (image.group == _orderedGroup && image.task == _orderedTask && image.listName == _orderedList) {
-        return group;
-      }
-    }
-    return groups.isEmpty ? null : groups.first;
+  String _projectBody() {
+    return reportSession.projectJson ?? '';
   }
 
   Widget _orderedRulePanel() {
-    final group = _selectedOrderedGroup();
-    if (group == null && _orderedCandidates.isEmpty) {
+    if (_result == null) {
       return const SizedBox.shrink();
     }
-    final image = group?.images.first;
+    final frames = _containFrames(_result);
+    final assets = parseOrderedAssets(_projectBody());
+    final lists = catalogLists(assets);
+    final options = listOptions(lists);
+    final ordinal = _activeOrdinal();
     return Column(
       key: const Key('ordered-rule'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 8),
         const Text('割付ルール'),
-        if (group != null)
-          DropdownButton<String>(
-            key: const Key('ordered-list'),
-            isExpanded: true,
-            value: '${image?.group}|${image?.task}|${image?.listName}',
-            items: [
-              for (final item in _orderedGroups())
-                DropdownMenuItem(
-                  value: '${item.images.first.group}|${item.images.first.task}|${item.images.first.listName}',
-                  child: Text(item.label),
-                ),
-            ],
-            onChanged: (value) {
-              final chosen = _orderedGroups().where(
-                (item) =>
-                    '${item.images.first.group}|${item.images.first.task}|${item.images.first.listName}' ==
-                    value,
-              );
-              if (chosen.isEmpty) {
-                return;
-              }
-              final first = chosen.first.images.first;
-              setState(() {
-                _orderedGroup = first.group;
-                _orderedTask = first.task;
-                _orderedList = first.listName;
-              });
-            },
+        const Text('各枠に、リストと番号を指定します。Comment= が無いリストは txt 名で出します。'),
+        if (lists.isEmpty)
+          const Text(
+            '先に「一覧を登録」で、2つの txt の画像を素材にしてください。',
+            key: Key('ordered-need-lists'),
           ),
-        DropdownButton<String>(
-          key: const Key('ordered-mode'),
-          isExpanded: true,
-          value: _ruleMode,
-          items: const [
-            DropdownMenuItem(value: 'sequential', child: Text('リストの順にN枚ずつ')),
-            DropdownMenuItem(value: 'explicit', child: Text('枠ごとに番号')),
-          ],
-          onChanged: (value) {
-            if (value == null) {
-              return;
-            }
-            setState(() => _ruleMode = value);
-          },
-        ),
-        TextField(
-          key: const Key('ordered-offset'),
-          controller: _ruleOffset,
-          decoration: const InputDecoration(labelText: '開始番号', isDense: true),
-        ),
         TextField(
           key: const Key('ordered-stride'),
           controller: _ruleStride,
-          decoration: const InputDecoration(labelText: '次のスライドへ進む数', isDense: true),
+          decoration: const InputDecoration(
+            labelText: '次のスライドへ進む数',
+            isDense: true,
+            helperText: '1 なら各リストの 1,2,3…。2 なら 1,3,5…',
+          ),
         ),
-        if (_ruleMode == 'sequential')
-          TextField(
-            key: const Key('ordered-per-slide'),
-            controller: _rulePerSlide,
-            decoration: const InputDecoration(labelText: '1スライドの枚数', isDense: true),
-          ),
-        if (_ruleMode == 'explicit')
-          TextField(
-            key: const Key('ordered-numbers'),
-            controller: _ruleNumbers,
-            decoration: const InputDecoration(
-              labelText: '枠ごとの番号',
-              helperText: '左の枠から順に、1,4 のように書きます',
-              isDense: true,
-            ),
-          ),
+        for (var index = 0; index < frames.length; index++)
+          _frameRuleRow(frames[index], index, options, assets, ordinal),
+        CheckboxListTile(
+          key: const Key('ordered-pin-slide'),
+          contentPadding: EdgeInsets.zero,
+          value: _pinThisSlide,
+          onChanged: (value) => setState(() => _pinThisSlide = value ?? false),
+          title: const Text('このスライドだけ別の番号にする'),
+          controlAffinity: ListTileControlAffinity.leading,
+        ),
         Wrap(
           spacing: 8,
           children: [
-            TextButton(
-              key: const Key('ordered-save-rule'),
-              onPressed: _saving ? null : _onSaveAssignmentRule,
-              child: const Text('ルールを保存'),
-            ),
-            TextButton(
-              key: const Key('ordered-propose'),
-              onPressed: _saving || image == null ? null : () => _onProposeOrdered(image),
-              child: const Text('候補を作る'),
+            FilledButton(
+              key: const Key('ordered-expand'),
+              onPressed: _saving || frames.isEmpty || lists.isEmpty ? null : _onExpandAssignment,
+              child: const Text('スライドへ広げる'),
             ),
             TextButton(
               key: const Key('ordered-accept-all'),
               onPressed: _saving || !_orderedCandidates.any((item) => item.status == 'ready')
                   ? null
-                  : () => _onAcceptOrdered(image),
-              child: const Text('候補をすべて採用'),
+                  : () => _onAcceptOrdered(),
+              child: const Text('すべて採用'),
             ),
           ],
         ),
@@ -4213,13 +4165,9 @@ class _PreviewHomeState extends State<PreviewHome> {
               if (candidate.status == 'ready')
                 TextButton(
                   key: Key('ordered-accept:${candidate.key}'),
-                  onPressed: _saving || image == null
+                  onPressed: _saving
                       ? null
-                      : () => _onAcceptOrdered(
-                            image,
-                            ordinal: candidate.slideOrdinal,
-                            frame: candidate.frameIndex,
-                          ),
+                      : () => _onAcceptOrdered(ordinal: candidate.slideOrdinal, frame: candidate.frameIndex),
                   child: const Text('この候補を採用'),
                 ),
             ],
@@ -4228,108 +4176,133 @@ class _PreviewHomeState extends State<PreviewHome> {
     );
   }
 
-  Future<void> _onRegisterLibraryList() async {
-    final records = <Map<String, Object?>>[];
-    for (final source in _librarySources) {
-      if (source.kind != LibrarySourceKind.vtv && source.kind != LibrarySourceKind.taskFile) {
-        continue;
-      }
-      for (final group in source.groups) {
-        for (final image in group.images) {
-          if (image.listIndex == null) {
-            continue;
-          }
-          final path = image.filePath ?? await _materializeLibraryImage(image);
-          if (!mounted || path == null) {
-            return;
-          }
-          records.add({
-            'path': path,
-            'source': image.source,
-            'group': image.group,
-            'task': image.task,
-            'listName': image.listName,
-            'listComment': image.listComment,
-            'listIndex': image.listIndex,
-          });
-        }
-      }
+  Widget _frameRuleRow(
+    PlacedElement frame,
+    int index,
+    List<ListOption> options,
+    List<OrderedAsset> assets,
+    int ordinal,
+  ) {
+    final stored = _frameLists[frame.elementId];
+    final choice = stored != null && options.any((option) => option.value == stored)
+        ? stored
+        : (options.isEmpty ? '' : (index < options.length ? options[index].value : options.first.value));
+    if (choice.isNotEmpty) {
+      _frameLists[frame.elementId] = choice;
     }
-    if (records.isEmpty) {
-      setState(() => _error = 'VTVかタスクファイルの一覧を読み込んでから登録してください');
-      return;
-    }
-    await _runProjectCommand(
-      '一覧を素材にしています',
-      (python, projectPath, layoutPath, pptxPath) => registerOrderedAssets(
-        pythonExecutable: python,
-        projectPath: projectPath,
-        layoutPath: layoutPath,
-        pptxPath: pptxPath,
-        payload: jsonEncode(records),
+    final selected = choice.isEmpty ? null : choice;
+    final itemController = _frameItems.putIfAbsent(frame.elementId, () => TextEditingController(text: '1'));
+    final itemNumber = int.tryParse(itemController.text.trim()) ?? 1;
+    final parsed = _splitListChoice(selected ?? '');
+    final shownNumber = itemNumber + ordinal * (int.tryParse(_ruleStride.text.trim()) ?? 1);
+    final resolved = parsed == null
+        ? const ResolvedPick(status: 'missing', name: '', reason: 'リストがありません')
+        : resolvePick(assets, parsed.$1, parsed.$2, shownNumber);
+    final preview = resolved.status == 'ready' ? resolved.name : resolved.reason;
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(frame.displayName, key: Key('frame-rule-name:${frame.elementId}')),
+          if (options.isNotEmpty)
+            DropdownButton<String>(
+              key: Key('frame-list:${frame.elementId}'),
+              isExpanded: true,
+              value: selected,
+              items: [
+                for (final option in options)
+                  DropdownMenuItem(value: option.value, child: Text(option.label)),
+              ],
+              onChanged: (value) {
+                if (value == null) {
+                  return;
+                }
+                setState(() => _frameLists[frame.elementId] = value);
+              },
+            ),
+          TextField(
+            key: Key('frame-item:${frame.elementId}'),
+            controller: itemController,
+            decoration: const InputDecoration(labelText: '番号', isDense: true),
+            onChanged: (_) => setState(() {}),
+          ),
+          Text(
+            'このスライドでは $preview',
+            key: Key('frame-preview:${frame.elementId}'),
+          ),
+        ],
       ),
-      '並びを素材に残しました。枠へはまだ入れていません。',
     );
   }
 
-  Map<String, Object> _rulePayload(LayoutResult? result) {
-    final frames = [
-      for (final element in result?.elements ?? const <PlacedElement>[])
-        if (element.kind == 'image_frame' && element.fitMode == 'contain') element,
-    ];
-    final numbers = [
-      for (final part in _ruleNumbers.text.split(','))
-        int.tryParse(part.trim()) ?? 0,
-    ];
+  (String, String)? _splitListChoice(String value) {
+    final split = value.indexOf(':');
+    if (split <= 0) {
+      return null;
+    }
+    return (value.substring(0, split), value.substring(split + 1));
+  }
+
+  Map<String, Object> _patternPayload() {
+    final frames = _containFrames(_result);
+    final ordinal = _activeOrdinal();
+    final step = int.tryParse(_ruleStride.text.trim()) ?? 1;
+    final pattern = <Map<String, Object>>[];
+    final overrideFrames = <Map<String, Object>>[];
+    for (var index = 0; index < frames.length; index++) {
+      final frame = frames[index];
+      final parsed = _splitListChoice(_frameLists[frame.elementId] ?? '');
+      final base = int.tryParse(_frameItems[frame.elementId]?.text.trim() ?? '') ?? 1;
+      if (parsed == null || base < 1) {
+        continue;
+      }
+      pattern.add({
+        'elementId': frame.elementId,
+        'frameIndex': index,
+        'listBy': parsed.$1,
+        'listKey': parsed.$2,
+        'itemNumber': base,
+      });
+      overrideFrames.add({
+        'elementId': frame.elementId,
+        'frameIndex': index,
+        'listBy': parsed.$1,
+        'listKey': parsed.$2,
+        'itemNumber': base + ordinal * step,
+      });
+    }
     return {
-      'mode': _ruleMode,
-      'offset': int.tryParse(_ruleOffset.text.trim()) ?? 1,
-      'stride': int.tryParse(_ruleStride.text.trim()) ?? 1,
-      'perSlide': int.tryParse(_rulePerSlide.text.trim()) ?? frames.length,
-      'mappings': [
-        for (var index = 0; index < frames.length && index < numbers.length; index++)
-          if (numbers[index] > 0)
-            {'elementId': frames[index].elementId, 'itemNumber': numbers[index]},
-      ],
+      'step': step,
+      'pattern': pattern,
+      if (_pinThisSlide)
+        'overrides': [
+          {'slideOrdinal': ordinal, 'frames': overrideFrames},
+        ],
     };
   }
 
-  Future<void> _onSaveAssignmentRule() async {
-    await _runProjectCommand(
-      '割付ルールを保存しています',
-      (python, projectPath, layoutPath, pptxPath) => saveAssignmentRule(
-        pythonExecutable: python,
-        projectPath: projectPath,
-        layoutPath: layoutPath,
-        pptxPath: pptxPath,
-        payload: jsonEncode(_rulePayload(_result)),
-      ),
-      '割付ルールをマスターに保存しました。枠へはまだ入れていません。',
-    );
-  }
-
-  Future<void> _onProposeOrdered(LibraryImage image) async {
+  Future<void> _onExpandAssignment() async {
     final layoutPath = _path.text.trim();
     final projectPath = projectPathForLayout(layoutPath);
+    final pptxPath = pptxPathForLayout(layoutPath);
     final python = pythonExecutableNearLayout(layoutPath);
-    if (projectPath == null || python == null) {
-      setState(() => _error = 'Python が見つからないため、割付候補を作れません');
+    if (projectPath == null || pptxPath == null || python == null) {
+      setState(() => _error = 'Python が見つからないため、スライドへ広げられません');
       return;
     }
     setState(() {
       _saving = true;
       _error = null;
-      _orderedGroup = image.group;
-      _orderedTask = image.task;
-      _orderedList = image.listName;
+      _status = 'スライドへ広げています';
     });
     try {
-      final proposal = await proposeOrderedAssignment(
+      final proposal = await expandAssignment(
         pythonExecutable: python,
         projectPath: projectPath,
-        group: image.group,
-        task: image.task,
-        listName: image.listName,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        payload: jsonEncode(_patternPayload()),
       );
       if (!mounted) {
         return;
@@ -4337,7 +4310,8 @@ class _PreviewHomeState extends State<PreviewHome> {
       setState(() {
         _orderedCandidates = proposal.candidates;
         _orderedWarnings = proposal.warnings;
-        _status = '候補を作りました。採用するまで枠は変わりません。';
+        _unsaved = reportSession.dirty;
+        _status = '候補をスライド分だけ出しました。すべて採用するまで枠は変わりません。';
       });
     } on FormatException catch (error) {
       if (mounted) {
@@ -4350,10 +4324,7 @@ class _PreviewHomeState extends State<PreviewHome> {
     }
   }
 
-  Future<void> _onAcceptOrdered(LibraryImage? image, {int? ordinal, int? frame}) async {
-    if (image == null) {
-      return;
-    }
+  Future<void> _onAcceptOrdered({int? ordinal, int? frame}) async {
     await _runProjectCommand(
       '割付候補を採用しています',
       (python, projectPath, layoutPath, pptxPath) => acceptOrderedAssignment(
@@ -4361,15 +4332,16 @@ class _PreviewHomeState extends State<PreviewHome> {
         projectPath: projectPath,
         layoutPath: layoutPath,
         pptxPath: pptxPath,
-        group: image.group,
-        task: image.task,
-        listName: image.listName,
+        group: '',
+        task: '',
+        listName: '',
         ordinal: ordinal,
         frame: frame,
       ),
       ordinal == null ? '候補を採用しました。未割当の番号はそのままです。' : '選んだ候補を採用しました。',
     );
   }
+
 
   Widget _assignmentCandidates() {
     final candidates = _candidates;
@@ -4647,6 +4619,7 @@ class _PreviewHomeState extends State<PreviewHome> {
       '表に空の列を追加しました。既存の文字は変えていません。',
     );
   }
+
 
   Future<void> _onImageFrameCommitted(String frameId, SlideRect frame) async {
     final layout = _result;

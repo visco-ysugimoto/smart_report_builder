@@ -967,6 +967,32 @@ OrderedProposal parseOrderedProposal(String stdout) {
   return OrderedProposal(warnings: warnings, candidates: candidates);
 }
 
+Future<OrderedProposal> expandAssignment({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  required String payload,
+}) async {
+  final result = await runReportCommand(pythonExecutable, [
+    '-m',
+    'smart_report_builder.roi_edit',
+    'expand-assignment',
+    projectPath,
+    '--payload',
+    payload,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ]);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? 'スライドへ広げられません' : message);
+  }
+  return parseOrderedProposal('${result.stdout}');
+}
+
 Future<OrderedProposal> proposeOrderedAssignment({
   required String pythonExecutable,
   required String projectPath,

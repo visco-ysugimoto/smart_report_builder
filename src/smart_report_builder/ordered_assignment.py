@@ -20,10 +20,12 @@ from smart_report_builder.models import (
     ContentMaster,
     FitMode,
     FrameMapping,
+    FrameRef,
     ImageFrameNode,
     LayoutDefinition,
     Project,
     SlideInstance,
+    SlideOverride,
     project_from_dict,
     project_to_dict,
 )
@@ -76,10 +78,17 @@ class OrderedProposal:
 
 
 def set_assignment_rule(project: Project, rule: AssignmentRule) -> None:
+    rule = normalize_rule(rule)
     _validate_rule(rule)
     project.content_master.assignment_rule = rule
     for layout in project.layouts:
         layout.content_master.assignment_rule = rule
+
+
+def expand_assignment(project: Project, rule: AssignmentRule) -> OrderedProposal:
+    """ルールをマスターへ保存し、全スライド分の候補を返す。割当は書かない。"""
+    set_assignment_rule(project, rule)
+    return propose_ordered_assignment(project)
 
 
 def register_ordered_assets(project: Project, records: list[dict]) -> tuple[int, int, list[str]]:
@@ -143,13 +152,15 @@ def propose_ordered_assignment(
     task: str | None = None,
     list_name: str | None = None,
 ) -> OrderedProposal:
-    """ルールとリストから候補を返す。プロジェクトは変えない。"""
+    """保存済みルールから候補を返す。リストの絞り込みには依存しない。"""
+    del group, task, list_name
     rule = project.content_master.assignment_rule
     if rule is None:
         raise ValueError("割付ルールがありません")
+    rule = normalize_rule(rule)
     _validate_rule(rule)
     before = project_to_dict(project)
-    proposal = _propose(project, rule, group=group, task=task, list_name=list_name)
+    proposal = _propose(project, rule)
     if project_to_dict(project) != before:
         raise RuntimeError("候補の計算がプロジェクトを変えた")
     return proposal
@@ -198,123 +209,245 @@ def accept_ordered_assignment(
     return applied
 
 
-def _propose(
-    project: Project,
-    rule: AssignmentRule,
-    *,
-    group: str | None,
-    task: str | None,
-    list_name: str | None,
-) -> OrderedProposal:
-    assets = _listed_assets(project, group=group, task=task, list_name=list_name)
-    by_number: dict[int, list[Asset]] = {}
-    for asset in assets:
-        if asset.list_index is None:
-            continue
-        by_number.setdefault(asset.list_index, []).append(asset)
-    max_item = max(by_number, default=0)
+def normalize_rule(rule: AssignmentRule) -> AssignmentRule:
+    """古い『1リストのN枚』と『枠ごとの番号』を、枠参照の繰り返しへ読み替える。"""
+    if rule.pattern:
+        step = rule.step if rule.step >= 1 else max(rule.stride, 1)
+        return AssignmentRule(
+            mode="pattern",
+            offset=rule.offset,
+            stride=rule.stride,
+            per_slide=max(rule.per_slide, len(rule.pattern)),
+            mappings=list(rule.mappings),
+            step=step,
+            pattern=list(rule.pattern),
+            overrides=list(rule.overrides),
+        )
+    if rule.mode == "explicit" and rule.mappings:
+        pattern = [
+            FrameRef(item.element_id, index, "position", "1", item.item_number)
+            for index, item in enumerate(rule.mappings)
+        ]
+    else:
+        count = rule.per_slide if rule.per_slide > 0 else 1
+        pattern = [
+            FrameRef("", index, "position", "1", rule.offset + index) for index in range(count)
+        ]
+    return AssignmentRule(
+        mode="pattern",
+        offset=rule.offset,
+        stride=rule.stride,
+        per_slide=max(rule.per_slide, len(pattern)),
+        mappings=list(rule.mappings),
+        step=max(rule.stride, 1),
+        pattern=pattern,
+        overrides=list(rule.overrides),
+    )
+
+
+def _propose(project: Project, rule: AssignmentRule) -> OrderedProposal:
     existing = _existing_frames(project)
     proposal = OrderedProposal()
-    for number, found in by_number.items():
-        if len(found) > 1:
-            names = "、".join(item.display_name for item in found)
-            proposal.warnings.append(f"リストの{number}番が複数あるため、自動では選びません: {names}")
     ordinal = 0
     while ordinal < _MAX_SLIDES:
-        if ordinal < len(existing):
-            slide_id, frames = existing[ordinal]
+        is_new = ordinal >= len(existing)
+        override = next((item for item in rule.overrides if item.slide_ordinal == ordinal), None)
+        if is_new:
+            slide_id = ""
+            count = len(override.frames) if override is not None and override.frames else len(rule.pattern)
+            frames: list[ImageFrameNode | None] = [None] * count
         else:
-            slide_id, frames = "", [None] * rule.per_slide
-        numbers = [
-            _item_number(rule, ordinal, index, "" if frame is None else frame.id)
-            for index, frame in enumerate(frames)
-        ]
-        usable = [number for number in numbers if number is not None]
-        if not usable or min(usable) > max(max_item, rule.offset):
-            if ordinal >= len(existing):
-                break
-        if usable and min(usable) > max_item and ordinal >= len(existing):
+            slide_id, concrete = existing[ordinal]
+            frames = list(concrete)
+        refs = _refs_for(rule, ordinal, len(frames))
+        if is_new and refs and all(_reference_is_past(project, ref) for ref in refs):
             break
-        if ordinal >= len(existing) and usable and min(usable) > max_item:
+        if not refs and is_new:
             break
-        for index, number in enumerate(numbers):
-            if number is None:
-                continue
-            frame = frames[index]
-            element_id = "" if frame is None else frame.id
-            manual = None
-            if ordinal < len(existing):
+        for index, ref in enumerate(refs):
+            frame = frames[index] if index < len(frames) else None
+            element_id = frame.id if frame is not None else ref.element_id
+            if not is_new and frame is not None:
                 manual = _manual_on_existing(project, slide_id, element_id)
+            else:
+                manual = None
             if manual is not None:
                 proposal.candidates.append(
                     OrderedCandidate(
-                        ordinal, slide_id, index, element_id, number, manual, "",
+                        ordinal, slide_id, index, element_id, ref.item_number, manual, "",
                         "protected", "手動割当", "手動の割当は残します",
                     )
                 )
                 proposal.warnings.append(f"{element_id} の手動割当は残します")
                 continue
-            found = by_number.get(number, [])
-            if len(found) == 0:
-                reason = f"リストに{number}番がありません"
-                proposal.candidates.append(
-                    OrderedCandidate(
-                        ordinal, slide_id, index, element_id, number, None, "",
-                        "missing", "未割当", reason,
-                    )
-                )
-                proposal.warnings.append(reason)
-                continue
-            if len(found) > 1:
-                reason = f"リストの{number}番が複数あります"
-                proposal.candidates.append(
-                    OrderedCandidate(
-                        ordinal, slide_id, index, element_id, number, None, "",
-                        "conflict", "競合", reason,
-                    )
-                )
-                proposal.warnings.append(reason)
-                continue
-            asset = found[0]
-            if _already_proposed(proposal, asset.id) or _bound_anywhere(project, asset.id):
-                proposal.candidates.append(
-                    OrderedCandidate(
-                        ordinal, slide_id, index, element_id, number, asset.id, asset.display_name,
-                        "conflict", "競合", "この素材は別の枠に使われています",
-                    )
-                )
-                continue
+            resolved = _resolve_ref(project, ref)
+            if resolved.status != "ready":
+                proposal.warnings.append(resolved.reason)
+            elif _already_proposed(proposal, resolved.asset_id or "") or _bound_anywhere(project, resolved.asset_id or ""):
+                resolved = _Resolved("conflict", resolved.asset_id, resolved.asset_name, "この素材は別の枠に使われています")
+                proposal.warnings.append(resolved.reason)
             proposal.candidates.append(
                 OrderedCandidate(
-                    ordinal, slide_id, index, element_id, number, asset.id, asset.display_name,
-                    "ready", "確定候補", f"リストの{number}番",
+                    ordinal,
+                    slide_id,
+                    index,
+                    element_id,
+                    ref.item_number,
+                    resolved.asset_id,
+                    resolved.asset_name,
+                    resolved.status,
+                    resolved.label,
+                    resolved.reason,
                 )
             )
         ordinal += 1
-        if ordinal >= len(existing):
-            upcoming = [
-                _item_number(rule, ordinal, index, "")
-                for index in range(rule.per_slide)
-            ]
-            upcoming = [number for number in upcoming if number is not None]
-            if not upcoming or min(upcoming) > max_item:
+        if is_new or ordinal >= len(existing):
+            upcoming = _refs_for(rule, ordinal, len(rule.pattern))
+            if not upcoming or all(_reference_is_past(project, ref) for ref in upcoming):
                 break
     return proposal
 
 
-def _item_number(rule: AssignmentRule, slide_index: int, frame_index: int, element_id: str) -> int | None:
-    if rule.mode == "sequential":
-        return rule.offset + slide_index * rule.stride + frame_index
-    chosen = None
-    for mapping in rule.mappings:
-        if element_id and mapping.element_id == element_id:
-            chosen = mapping.item_number
-            break
-    if chosen is None and frame_index < len(rule.mappings):
-        chosen = rule.mappings[frame_index].item_number
-    if chosen is None:
-        return None
-    return chosen + slide_index * rule.stride
+@dataclass
+class _Resolved:
+    status: str
+    asset_id: str | None
+    asset_name: str
+    reason: str
+
+    @property
+    def label(self) -> str:
+        if self.status == "ready":
+            return "確定候補"
+        if self.status == "conflict":
+            return "競合"
+        return "未割当"
+
+
+@dataclass(frozen=True)
+class ImageList:
+    group: str
+    task: str
+    list_name: str
+    list_comment: str
+    position: int
+    task_position: int
+
+
+def image_lists(project: Project) -> list[ImageList]:
+    """リストは group、task、txt 名、Comment= で分け、txt 名順に位置を付ける。"""
+    keys: list[tuple[str, str, str, str]] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for asset in project.assets:
+        if asset.list_index is None:
+            continue
+        key = (asset.group or "", asset.task or "", asset.list_name or "", asset.list_comment or "")
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    keys.sort()
+    task_counts: dict[tuple[str, str], int] = {}
+    found: list[ImageList] = []
+    for key in keys:
+        task_key = (key[0], key[1])
+        task_counts[task_key] = task_counts.get(task_key, 0) + 1
+        found.append(
+            ImageList(
+                group=key[0],
+                task=key[1],
+                list_name=key[2],
+                list_comment=key[3],
+                position=len(found) + 1,
+                task_position=task_counts[task_key],
+            )
+        )
+    return found
+
+
+def matching_lists(project: Project, list_by: str, list_key: str) -> list[ImageList]:
+    lists = image_lists(project)
+    if list_by == "position":
+        return [item for item in lists if str(item.task_position) == str(list_key)]
+    if list_by == "name":
+        return [item for item in lists if item.list_name == list_key]
+    matched = [item for item in lists if item.list_comment and item.list_comment == list_key]
+    if matched:
+        return matched
+    return [item for item in lists if not item.list_comment and item.list_name == list_key]
+
+
+def _assets_in_list(project: Project, image_list: ImageList, number: int) -> list[Asset]:
+    return [
+        asset
+        for asset in project.assets
+        if asset.list_index == number
+        and (asset.group or "") == image_list.group
+        and (asset.task or "") == image_list.task
+        and (asset.list_name or "") == image_list.list_name
+        and (asset.list_comment or "") == image_list.list_comment
+    ]
+
+
+def _list_label(image_list: ImageList) -> str:
+    return image_list.list_comment or image_list.list_name or f"{image_list.task_position}番目のリスト"
+
+
+def _resolve_ref(project: Project, ref: FrameRef) -> _Resolved:
+    lists = matching_lists(project, ref.list_by, ref.list_key)
+    label = ref.list_key or "リスト"
+    if len(lists) == 0:
+        return _Resolved("missing", None, "", f"{label} の{ref.item_number}番がありません")
+    if len(lists) > 1:
+        return _Resolved("conflict", None, "", f"同じ指定のリストが複数あります: {label}")
+    found = _assets_in_list(project, lists[0], ref.item_number)
+    list_label = _list_label(lists[0])
+    if len(found) == 0:
+        return _Resolved("missing", None, "", f"{list_label} に{ref.item_number}番がありません")
+    if len(found) > 1:
+        return _Resolved("conflict", None, "", f"{list_label} の{ref.item_number}番が複数あります")
+    asset = found[0]
+    return _Resolved("ready", asset.id, asset.display_name, f"{list_label} の{ref.item_number}番")
+
+
+def _reference_is_past(project: Project, ref: FrameRef) -> bool:
+    lists = matching_lists(project, ref.list_by, ref.list_key)
+    if len(lists) != 1:
+        return True
+    numbers = [
+        asset.list_index
+        for asset in project.assets
+        if asset.list_index is not None and _same_list(asset, lists[0])
+    ]
+    if not numbers:
+        return True
+    return ref.item_number > max(numbers)
+
+
+def _same_list(asset: Asset, image_list: ImageList) -> bool:
+    return (
+        (asset.group or "") == image_list.group
+        and (asset.task or "") == image_list.task
+        and (asset.list_name or "") == image_list.list_name
+        and (asset.list_comment or "") == image_list.list_comment
+    )
+
+
+def _refs_for(rule: AssignmentRule, ordinal: int, frame_count: int) -> list[FrameRef]:
+    override = next((item for item in rule.overrides if item.slide_ordinal == ordinal), None)
+    if override is not None:
+        return list(override.frames[:frame_count])
+    refs: list[FrameRef] = []
+    for index, ref in enumerate(rule.pattern[:frame_count]):
+        refs.append(
+            FrameRef(
+                ref.element_id,
+                ref.frame_index,
+                ref.list_by,
+                ref.list_key,
+                ref.item_number + ordinal * rule.step,
+            )
+        )
+    return refs
 
 
 def _materialize_slides(project: Project, proposal: OrderedProposal) -> None:
@@ -504,17 +637,19 @@ def _frames(node) -> list[ImageFrameNode]:
 
 
 def _validate_rule(rule: AssignmentRule) -> None:
-    if rule.mode not in {"explicit", "sequential"}:
-        raise ValueError("割付は番号の指定か、枚数ごとの順送りです")
-    if rule.offset < 1 or rule.stride < 1 or rule.per_slide < 1:
-        raise ValueError("開始番号、送り、1枚あたりの枚数は1以上です")
-    if rule.per_slide > 8:
+    if rule.step < 1:
+        raise ValueError("次のスライドへ進む数は1以上です")
+    if not rule.pattern:
+        raise ValueError("枠の参照がありません")
+    if len(rule.pattern) > 8:
         raise ValueError("1枚あたりの画像枠は8までです")
-    if rule.mode == "explicit" and not rule.mappings:
-        raise ValueError("枠ごとの番号がありません")
-    for mapping in rule.mappings:
-        if mapping.item_number < 1:
+    for ref in [*rule.pattern, *[ref for item in rule.overrides for ref in item.frames]]:
+        if ref.item_number < 1:
             raise ValueError("リストの番号は1から始まります")
+        if ref.list_by not in {"comment", "name", "position"}:
+            raise ValueError("リストの指定が違います")
+        if not str(ref.list_key):
+            raise ValueError("リストの指定が空です")
 
 
 def _blank(value) -> str | None:
@@ -548,14 +683,52 @@ def proposal_json(proposal: OrderedProposal) -> str:
 
 
 def rule_from_payload(payload: dict) -> AssignmentRule:
+    if payload.get("pattern"):
+        pattern = [
+            FrameRef(
+                element_id=str(item.get("elementId") or ""),
+                frame_index=int(item.get("frameIndex", index)),
+                list_by=str(item.get("listBy") or "comment"),
+                list_key=str(item.get("listKey") or ""),
+                item_number=int(item["itemNumber"]),
+            )
+            for index, item in enumerate(payload["pattern"])
+        ]
+        overrides = [
+            SlideOverride(
+                slide_ordinal=int(item.get("slideOrdinal", 0)),
+                frames=[
+                    FrameRef(
+                        element_id=str(ref.get("elementId") or ""),
+                        frame_index=int(ref.get("frameIndex", index)),
+                        list_by=str(ref.get("listBy") or "comment"),
+                        list_key=str(ref.get("listKey") or ""),
+                        item_number=int(ref["itemNumber"]),
+                    )
+                    for index, ref in enumerate(item.get("frames") or [])
+                ],
+            )
+            for item in payload.get("overrides") or []
+        ]
+        return normalize_rule(
+            AssignmentRule(
+                mode="pattern",
+                step=int(payload.get("step", 1)),
+                per_slide=len(pattern),
+                pattern=pattern,
+                overrides=overrides,
+            )
+        )
     mappings = [
         FrameMapping(element_id=str(item["elementId"]), item_number=int(item["itemNumber"]))
         for item in payload.get("mappings", [])
     ]
-    return AssignmentRule(
-        mode=str(payload["mode"]),
-        offset=int(payload.get("offset", 1)),
-        stride=int(payload.get("stride", payload.get("perSlide", 1))),
-        per_slide=int(payload.get("perSlide", 2)),
-        mappings=mappings,
+    return normalize_rule(
+        AssignmentRule(
+            mode=str(payload.get("mode") or "sequential"),
+            offset=int(payload.get("offset", 1)),
+            stride=int(payload.get("stride", payload.get("perSlide", 1))),
+            per_slide=int(payload.get("perSlide", 2)),
+            mappings=mappings,
+        )
     )

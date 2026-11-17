@@ -6,15 +6,17 @@ from PIL import Image
 
 from smart_report_builder.models import (
     SCHEMA_VERSION,
-    Asset,
     AssignmentRule,
     Binding,
     FrameMapping,
+    FrameRef,
+    SlideOverride,
     project_from_dict,
     project_to_dict,
 )
 from smart_report_builder.ordered_assignment import (
     accept_ordered_assignment,
+    expand_assignment,
     propose_ordered_assignment,
     register_ordered_assets,
     set_assignment_rule,
@@ -22,7 +24,7 @@ from smart_report_builder.ordered_assignment import (
 from smart_report_builder.practical import assignment_candidates
 from smart_report_builder.project_factory import create_report
 from smart_report_builder.project_store import load_project, save_project
-from smart_report_builder.roi_edit import add_layout, add_slide
+from smart_report_builder.roi_edit import add_layout
 
 
 def _png(path: Path) -> Path:
@@ -174,6 +176,101 @@ def test_manual_assignment_is_kept_and_one_candidate_can_be_accepted(tmp_path: P
     ]
     with pytest.raises(ValueError, match="割付ルールがありません"):
         propose_ordered_assignment(create_report())
+
+
+def test_saved_rule_expands_across_two_lists_without_a_list_filter(tmp_path: Path):
+    """ルール保存のあとに、リストを1つに絞らなくてもスライドへ候補が広がる。"""
+    project = create_report(image_count=2)
+    _load_named_list(project, tmp_path / "a", "outer", "外観", 3)
+    _load_named_list(project, tmp_path / "b", "inner", "処理", 2)
+    rule = AssignmentRule(
+        mode="pattern",
+        step=1,
+        pattern=[
+            FrameRef("frame-overall", 0, "comment", "外観", 1),
+            FrameRef("frame-compare", 1, "comment", "処理", 1),
+        ],
+    )
+    before_bindings = list(project.slide.bindings)
+    proposal = expand_assignment(project, rule)
+    assert project.slide.bindings == before_bindings
+    assert project.report_slides == []
+    slide0 = [item for item in proposal.candidates if item.slide_ordinal == 0 and item.status == "ready"]
+    assert [item.asset_name for item in slide0] == ["img_1", "img_1"]
+    assert {item.reason for item in slide0} == {"外観 の1番", "処理 の1番"}
+    slide1 = [item for item in proposal.candidates if item.slide_ordinal == 1 and item.status == "ready"]
+    assert [(item.frame_index, item.item_number) for item in slide1] == [(0, 2), (1, 2)]
+    missing = [item for item in proposal.candidates if item.slide_ordinal == 2 and item.status == "missing"]
+    assert [item.frame_index for item in missing] == [1]
+    applied = accept_ordered_assignment(project)
+    assert len(applied) == 5
+    assert len(project.report_slides) == 3
+
+
+def test_step_override_and_duplicate_comment(tmp_path: Path):
+    project = create_report(image_count=2)
+    _load_named_list(project, tmp_path / "a", "outer", "外観", 4)
+    _load_named_list(project, tmp_path / "b", "inner", "処理", 4)
+    rule = AssignmentRule(
+        mode="pattern",
+        step=2,
+        pattern=[
+            FrameRef("frame-overall", 0, "position", "1", 1),
+            FrameRef("frame-compare", 1, "position", "2", 1),
+        ],
+        overrides=[
+            SlideOverride(
+                slide_ordinal=1,
+                frames=[
+                    FrameRef("frame-overall", 0, "name", "inner", 4),
+                    FrameRef("frame-compare", 1, "name", "outer", 4),
+                ],
+            )
+        ],
+    )
+    proposal = expand_assignment(project, rule)
+    stepped = [(item.frame_index, item.item_number, item.asset_name) for item in proposal.candidates if item.slide_ordinal == 0]
+    assert stepped == [(0, 1, "img_1"), (1, 1, "img_1")]
+    override = [(item.frame_index, item.item_number, item.reason) for item in proposal.candidates if item.slide_ordinal == 1]
+    assert override == [(0, 4, "処理 の4番"), (1, 4, "外観 の4番")]
+    copied = _load_named_list
+    duplicate = create_report(image_count=2)
+    copied(duplicate, tmp_path / "c", "one", "外観", 1)
+    copied(duplicate, tmp_path / "d", "two", "外観", 1)
+    set_assignment_rule(
+        duplicate,
+        AssignmentRule(
+            pattern=[FrameRef("frame-overall", 0, "comment", "外観", 1)],
+            step=1,
+        ),
+    )
+    conflict = propose_ordered_assignment(duplicate)
+    assert conflict.candidates[0].status == "conflict"
+    assert "複数" in conflict.candidates[0].reason
+    saved = project_to_dict(project)
+    saved["contentMaster"]["assignmentRule"] = {
+        "mode": "sequential",
+        "offset": 1,
+        "stride": 2,
+        "perSlide": 2,
+        "mappings": [],
+    }
+    migrated = project_from_dict(saved)
+    assert migrated.content_master.assignment_rule.pattern[0].list_by == "position"
+    assert migrated.content_master.assignment_rule.step == 2
+
+
+def _load_named_list(project, directory: Path, list_name: str, comment: str, count: int) -> None:
+    records = [
+        _record(
+            _png(directory / f"img_{index}.png"),
+            index,
+            listName=list_name,
+            listComment=comment,
+        )
+        for index in range(1, count + 1)
+    ]
+    register_ordered_assets(project, records)
 
 
 def _asset_is_bound(project, asset_id: str) -> bool:
