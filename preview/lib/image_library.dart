@@ -32,6 +32,12 @@ class LibraryImage {
     required this.sourceId,
     this.filePath,
     this.archiveEntry,
+    this.group = '',
+    this.task = '',
+    this.listName = '',
+    this.listComment,
+    this.listIndex,
+    this.source = '',
   });
 
   final String id;
@@ -39,6 +45,12 @@ class LibraryImage {
   final String sourceId;
   final String? filePath;
   final String? archiveEntry;
+  final String group;
+  final String task;
+  final String listName;
+  final String? listComment;
+  final int? listIndex;
+  final String source;
 }
 
 class LibraryGroup {
@@ -77,10 +89,39 @@ class LibrarySource {
 }
 
 class NamedGroup {
-  const NamedGroup(this.label, this.names);
+  const NamedGroup(
+    this.label,
+    this.names, {
+    this.listName = '',
+    this.listComment,
+    this.indexes = const {},
+  });
 
   final String label;
   final List<String> names;
+  final String listName;
+  final String? listComment;
+  final Map<String, int> indexes;
+}
+
+class TaskReference {
+  const TaskReference({
+    required this.listName,
+    required this.refs,
+    this.listComment,
+  });
+
+  final String listName;
+  final String? listComment;
+  final List<String> refs;
+
+  String displayName(String baseLabel) {
+    final comment = listComment?.trim() ?? '';
+    if (comment.isEmpty) {
+      return listName.isEmpty ? baseLabel : '$baseLabel / $listName';
+    }
+    return '$baseLabel / $comment';
+  }
 }
 
 class ZipEntry {
@@ -132,17 +173,29 @@ String libraryBaseName(String path) {
 List<NamedGroup> arrangeImageGroups({
   required String baseLabel,
   required List<String> names,
-  required List<({String label, List<String> refs})> references,
+  required List<TaskReference> references,
 }) {
   final usable = [
     for (final reference in references)
       if (reference.refs.isNotEmpty) reference,
   ];
   if (usable.isEmpty) {
-    return [NamedGroup(baseLabel, _sortNames(names))];
+    final sorted = _sortNames(names);
+    return [NamedGroup(baseLabel, sorted, indexes: _positionalIndexes(sorted))];
   }
   if (usable.length == 1) {
-    return [NamedGroup(baseLabel, _orderByRefs(names, usable.single.refs))];
+    final reference = usable.single;
+    final comment = reference.listComment?.trim() ?? '';
+    final ordered = _orderByRefs(names, reference.refs);
+    return [
+      NamedGroup(
+        comment.isEmpty ? baseLabel : '$baseLabel / $comment',
+        ordered,
+        listName: reference.listName,
+        listComment: comment.isEmpty ? null : comment,
+        indexes: _fileOrderIndexes(names, reference.refs),
+      ),
+    ];
   }
   final used = <String>{};
   final groups = <NamedGroup>[];
@@ -158,12 +211,21 @@ List<NamedGroup> arrangeImageGroups({
       }
     }
     if (ordered.isNotEmpty) {
-      groups.add(NamedGroup('$baseLabel / ${reference.label}', ordered));
+      groups.add(
+        NamedGroup(
+          reference.displayName(baseLabel),
+          ordered,
+          listName: reference.listName,
+          listComment: reference.listComment,
+          indexes: _fileOrderIndexes(names, reference.refs),
+        ),
+      );
     }
   }
   final rest = [for (final name in names) if (!used.contains(name)) name];
   if (rest.isNotEmpty) {
-    groups.add(NamedGroup('$baseLabel / その他', _sortNames(rest)));
+    final sorted = _sortNames(rest);
+    groups.add(NamedGroup('$baseLabel / その他', sorted, indexes: _positionalIndexes(sorted)));
   }
   if (groups.isEmpty) {
     return [NamedGroup(baseLabel, _sortNames(names))];
@@ -171,20 +233,38 @@ List<NamedGroup> arrangeImageGroups({
   return groups;
 }
 
-List<String> parseFileReferences(List<int> bytes) {
+/// Comment= は先頭から順に、空でない値を「 / 」でつなぐ。FILE= 以外は使わない。
+TaskReference parseTaskListText(List<int> bytes, {String listName = ''}) {
   final text = _decodeTaskText(bytes);
-  final names = <String>[];
+  final comments = <String>[];
+  final files = <String>[];
   for (final line in text.split(RegExp(r'\r?\n'))) {
-    final marker = line.indexOf('FILE=');
-    if (marker < 0) {
+    final commentAt = line.indexOf('Comment=');
+    final fileAt = line.indexOf('FILE=');
+    if (commentAt >= 0 && (fileAt < 0 || commentAt < fileAt)) {
+      final value = line.substring(commentAt + 'Comment='.length).trim();
+      if (value.isNotEmpty) {
+        comments.add(value);
+      }
       continue;
     }
-    final name = line.substring(marker + 'FILE='.length).trim();
+    if (fileAt < 0) {
+      continue;
+    }
+    final name = line.substring(fileAt + 'FILE='.length).trim();
     if (name.isNotEmpty) {
-      names.add(name);
+      files.add(name);
     }
   }
-  return names;
+  return TaskReference(
+    listName: listName,
+    listComment: comments.isEmpty ? null : comments.join(' / '),
+    refs: files,
+  );
+}
+
+List<String> parseFileReferences(List<int> bytes) {
+  return parseTaskListText(bytes).refs;
 }
 
 /// `viscotech/task/g01/03/img/a.bmp` を `g01/03` にする。
@@ -343,11 +423,15 @@ Future<LibrarySource> loadVtvImages({
     names: [for (final file in files) file.path],
     references: refs,
   );
+  final parts = _groupAndTask(label);
   final built = _groupsFromNames(
     sourceId: sourceId,
     arranged: arranged,
     maxImages: maxImages,
     fileForName: (name) => name,
+    group: parts.$1,
+    task: parts.$2,
+    source: 'folder',
   );
   return LibrarySource(
     id: sourceId,
@@ -428,23 +512,21 @@ Future<LibrarySource> loadTaskFileImages({
   var truncated = false;
   for (final directory in directories) {
     final entries = imagesByDir[directory]!;
-    final references = <({String label, List<String> refs})>[];
+    final references = <TaskReference>[];
     final txts = txtByDir[directory] ?? const <ZipEntry>[];
     txts.sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
     for (final txt in txts) {
       if (txt.uncompressedSize > 1024 * 1024) {
         continue;
       }
-      final refs = parseFileReferences(readZipEntry(catalog.filePath, txt));
-      if (refs.isEmpty) {
-        continue;
-      }
       final stem = libraryBaseName(txt.name);
       final dot = stem.lastIndexOf('.');
-      references.add((
-        label: dot > 0 ? stem.substring(0, dot) : stem,
-        refs: refs,
-      ));
+      final listName = dot > 0 ? stem.substring(0, dot) : stem;
+      final parsed = parseTaskListText(readZipEntry(catalog.filePath, txt), listName: listName);
+      if (parsed.refs.isEmpty) {
+        continue;
+      }
+      references.add(parsed);
     }
     final sample = entries.first.name;
     final arranged = arrangeImageGroups(
@@ -452,19 +534,25 @@ Future<LibrarySource> loadTaskFileImages({
       names: [for (final entry in entries) entry.name],
       references: references,
     );
+    final parts = _groupAndTask(taskGroupLabel(sample));
     for (final arrangedGroup in arranged) {
       final images = <LibraryImage>[];
-      for (final name in arrangedGroup.names) {
+      for (var index = 0; index < arrangedGroup.names.length; index++) {
+        final name = arrangedGroup.names[index];
         if (count >= maxImages) {
           truncated = true;
           break;
         }
         count += 1;
         images.add(
-          LibraryImage(
-            id: '$sourceId:$name',
-            name: libraryBaseName(name),
+          _orderedImage(
             sourceId: sourceId,
+            storedName: name,
+            listIndex: arrangedGroup.indexes[name] ?? index + 1,
+            arranged: arrangedGroup,
+            group: parts.$1,
+            task: parts.$2,
+            source: 'task-file',
             archiveEntry: name,
           ),
         );
@@ -609,18 +697,57 @@ Future<String> writeTempLibraryImage({
   return file.path;
 }
 
+(String, String) _groupAndTask(String label) {
+  final slash = label.indexOf('/');
+  if (slash <= 0) {
+    return (label, '');
+  }
+  final task = label.substring(slash + 1).split('/').first;
+  return (label.substring(0, slash), task);
+}
+
+LibraryImage _orderedImage({
+  required String sourceId,
+  required String storedName,
+  required int listIndex,
+  required NamedGroup arranged,
+  required String group,
+  required String task,
+  required String source,
+  String? filePath,
+  String? archiveEntry,
+}) {
+  return LibraryImage(
+    id: '$sourceId:$storedName',
+    name: libraryBaseName(storedName),
+    sourceId: sourceId,
+    filePath: filePath,
+    archiveEntry: archiveEntry,
+    group: group,
+    task: task,
+    listName: arranged.listName,
+    listComment: arranged.listComment,
+    listIndex: listIndex,
+    source: source,
+  );
+}
+
 ({List<LibraryGroup> groups, bool truncated}) _groupsFromNames({
   required String sourceId,
   required List<NamedGroup> arranged,
   required int maxImages,
   required String Function(String name) fileForName,
+  String group = '',
+  String task = '',
+  String source = '',
 }) {
   final groups = <LibraryGroup>[];
   var count = 0;
   var truncated = false;
   for (final arrangedGroup in arranged) {
     final images = <LibraryImage>[];
-    for (final name in arrangedGroup.names) {
+    for (var index = 0; index < arrangedGroup.names.length; index++) {
+      final name = arrangedGroup.names[index];
       if (count >= maxImages) {
         truncated = true;
         break;
@@ -628,10 +755,14 @@ Future<String> writeTempLibraryImage({
       count += 1;
       final filePath = fileForName(name);
       images.add(
-        LibraryImage(
-          id: '$sourceId:$name',
-          name: libraryBaseName(name),
+        _orderedImage(
           sourceId: sourceId,
+          storedName: name,
+          listIndex: arrangedGroup.indexes[name] ?? index + 1,
+          arranged: arrangedGroup,
+          group: group,
+          task: task,
+          source: source,
           filePath: filePath,
         ),
       );
@@ -725,6 +856,28 @@ List<String> _orderByRefs(List<String> names, List<String> refs) {
   return [...ordered, ..._sortNames(rest)];
 }
 
+Map<String, int> _fileOrderIndexes(List<String> names, List<String> refs) {
+  final byLower = {
+    for (final name in names) libraryBaseName(name).toLowerCase(): name,
+  };
+  final indexes = <String, int>{};
+  for (var index = 0; index < refs.length; index++) {
+    final match = byLower[libraryBaseName(refs[index]).toLowerCase()];
+    if (match != null) {
+      indexes[match] = index + 1;
+    }
+  }
+  var next = refs.length + 1;
+  for (final name in _sortNames(names)) {
+    indexes.putIfAbsent(name, () => next++);
+  }
+  return indexes;
+}
+
+Map<String, int> _positionalIndexes(List<String> names) {
+  return {for (var index = 0; index < names.length; index++) names[index]: index + 1};
+}
+
 List<String> _sortNames(List<String> names) {
   final sorted = [...names]..sort(
     (a, b) => libraryBaseName(
@@ -787,7 +940,7 @@ Future<List<File>> _imageFilesIn(Directory dir) async {
   return files;
 }
 
-Future<List<({String label, List<String> refs})>> _txtReferences(
+Future<List<TaskReference>> _txtReferences(
   Directory dir,
 ) async {
   final txts = <File>[];
@@ -805,7 +958,7 @@ Future<List<({String label, List<String> refs})>> _txtReferences(
       a.path,
     ).toLowerCase().compareTo(libraryBaseName(b.path).toLowerCase()),
   );
-  final references = <({String label, List<String> refs})>[];
+  final references = <TaskReference>[];
   for (final txt in txts) {
     Uint8List bytes;
     try {
@@ -816,16 +969,14 @@ Future<List<({String label, List<String> refs})>> _txtReferences(
     if (bytes.length > 1024 * 1024) {
       continue;
     }
-    final refs = parseFileReferences(bytes);
-    if (refs.isEmpty) {
-      continue;
-    }
     final stem = libraryBaseName(txt.path);
     final dot = stem.lastIndexOf('.');
-    references.add((
-      label: dot > 0 ? stem.substring(0, dot) : stem,
-      refs: refs,
-    ));
+    final listName = dot > 0 ? stem.substring(0, dot) : stem;
+    final parsed = parseTaskListText(bytes, listName: listName);
+    if (parsed.refs.isEmpty) {
+      continue;
+    }
+    references.add(parsed);
   }
   return references;
 }

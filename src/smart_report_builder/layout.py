@@ -12,6 +12,7 @@ import unicodedata
 
 from smart_report_builder.fit import contain_rect, map_normalized_rect
 from smart_report_builder.models import (
+    LAYOUT_SCHEMA_VERSION,
     SCHEMA_VERSION,
     Asset,
     Binding,
@@ -88,7 +89,7 @@ def layout_slide(project: Project) -> LayoutResult:
     if design.orientation:
         title_text = project.slide.title.strip() or design.page_title or "撮像画像"
     return LayoutResult(
-        schema_version=SCHEMA_VERSION,
+        schema_version=LAYOUT_SCHEMA_VERSION,
         slide_width_pt=design.slide_width_pt,
         slide_height_pt=design.slide_height_pt,
         elements=elements,

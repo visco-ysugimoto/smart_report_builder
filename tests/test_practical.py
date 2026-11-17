@@ -102,13 +102,13 @@ def test_role_keywords_and_folder_order_wait_for_acceptance(tmp_path: Path):
     before = project_to_dict(project)
     found = assignment_candidates(project)
     assert project_to_dict(project) == before
-    ready = {(item.element_id, item.asset_id, item.confidence, item.reason) for item in found if item.status == "ready"}
-    assert ready == {
-        ("frame-overall", "asset-overall", 0.9, "ファイル名の役割語が一致"),
-        ("frame-compare", "asset-compare", 0.9, "ファイル名の役割語が一致"),
+    weak = {(item.element_id, item.asset_id, item.confidence, item.reason) for item in found if item.status == "confirm"}
+    assert weak == {
+        ("frame-overall", "asset-overall", 0.4, "ファイル名の役割語が一致"),
+        ("frame-compare", "asset-compare", 0.4, "ファイル名の役割語が一致"),
     }
-    assert all(item.label == "確定候補" for item in found if item.status == "ready")
-    assert [(item.element_id, item.asset_id) for item in found if item.status != "ready"] == []
+    assert all(item.label == "確認推奨" for item in found if item.status == "confirm")
+    assert [item for item in found if item.status == "ready"] == []
 
     project.assets = [
         _asset(tmp_path / "only" / "plain-b.png", "asset-b", (20, 20)),
@@ -180,7 +180,7 @@ def test_custom_synonyms_and_zoom_role_need_a_contain_frame(tmp_path: Path):
     custom = {"overall": ["外観"]}
     found = assignment_candidates(project, custom)
     assert [(item.element_id, item.asset_id, item.status) for item in found] == [
-        ("frame-overall", "asset-look", "ready")
+        ("frame-overall", "asset-look", "confirm")
     ]
     processed_project = create_report(template="overall-zoom")
     images = processed_project.content_master.root.children[0]
@@ -189,7 +189,7 @@ def test_custom_synonyms_and_zoom_role_need_a_contain_frame(tmp_path: Path):
     )
     processed_project.assets = [_asset(tmp_path / "pics" / "処理_3.png", "asset-proc", (16, 16))]
     processed = [item for item in assignment_candidates(processed_project) if item.element_id == "frame-processed"]
-    assert [(item.asset_id, item.status, item.confidence) for item in processed] == [("asset-proc", "ready", 0.9)]
+    assert [(item.asset_id, item.status, item.confidence) for item in processed] == [("asset-proc", "confirm", 0.4)]
     assert all(item.element_id != "frame-zoom" for item in assignment_candidates(processed_project))
     assert project.slide.bindings == []
 
@@ -209,15 +209,14 @@ def test_suggest_and_accept_ready_commands_leave_conflicts(tmp_path: Path, capsy
     assert main(["suggest", str(path), "--synonyms", str(synonyms)]) == 0
     assert path.read_bytes() == before
     lines = [line for line in capsys.readouterr().out.splitlines() if line and line != "none"]
-    assert any(line.startswith("ready\tframe-overall\tasset-overall\t") and "\t0.90\t確定候補\t" in line for line in lines)
+    assert any(line.startswith("confirm\tframe-overall\tasset-overall\t") and "\t0.40\t確認推奨\t" in line for line in lines)
     assert any(line.startswith("conflict\t") and line.endswith("フォルダが複数あるため、並びを自動では選べない") for line in lines)
 
     assert main(["accept-ready", str(path), "--synonyms", str(synonyms)]) == 0
     saved = load_project(path)
-    assert [(item.element_id, item.asset_id) for item in saved.slide.bindings] == [("frame-overall", "asset-overall")]
+    assert saved.slide.bindings == []
     output = capsys.readouterr().out
-    assert "assigned frame-overall asset-overall" in output
-    assert "frame-compare" not in output
+    assert output.strip() == "none"
 
 
 def test_broken_synonym_file_does_not_change_the_project(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
@@ -248,12 +247,27 @@ def test_session_lists_candidates_without_writing_and_accepts_on_save(tmp_path: 
     listed = session.run(["suggest", str(project_path)])
     assert listed["code"] == 0
     assert listed["dirty"] is False
-    assert "ready\tframe-compare\tasset-compare\t" in listed["stdout"]
-    assert "0.90\t確定候補\tファイル名の役割語が一致" in listed["stdout"]
+    assert "confirm\tframe-compare\tasset-compare\t" in listed["stdout"]
+    assert "0.40\t確認推奨\tファイル名の役割語が一致" in listed["stdout"]
     assert project_path.read_bytes() == before
     assert not layout_path.exists()
 
-    accepted = session.run(["accept-ready", str(project_path), "--layout", str(layout_path), "--pptx", str(pptx_path)])
+    skipped = session.run(["accept-ready", str(project_path), "--layout", str(layout_path), "--pptx", str(pptx_path)])
+    assert skipped["code"] == 0
+    assert skipped["dirty"] is False
+    assert skipped["stdout"].strip() == "none"
+    accepted = session.run(
+        [
+            "apply-suggestion",
+            str(project_path),
+            "frame-compare",
+            "asset-compare",
+            "--layout",
+            str(layout_path),
+            "--pptx",
+            str(pptx_path),
+        ]
+    )
     assert accepted["code"] == 0
     assert accepted["dirty"] is True
     assert project_path.read_bytes() == before

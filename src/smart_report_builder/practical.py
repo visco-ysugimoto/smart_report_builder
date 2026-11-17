@@ -100,6 +100,8 @@ def assignment_candidates(
         if frame.fit_mode == FitMode.CONTAIN and frame.id not in bound
     ]
     unused = [asset for asset in project.assets if asset.id not in used]
+    if any(asset.list_index is not None for asset in project.assets):
+        unused = [asset for asset in unused if asset.list_index is None]
     found: list[AssignmentCandidate] = []
     taken_assets: set[str] = set()
     taken_frames: set[str] = set()
@@ -118,6 +120,8 @@ def assignment_candidates(
                 taken_assets.add(asset.id)
             taken_frames.add(frame.id)
 
+    if any(asset.list_index is not None for asset in project.assets):
+        return found
     keyword_frames = [frame for frame in frames if frame.id not in taken_frames]
     keyword_assets = [asset for asset in unused if asset.id not in taken_assets]
     hits = {asset.id: _matching_roles(asset, table) for asset in keyword_assets}
@@ -133,7 +137,7 @@ def assignment_candidates(
     for frame in keyword_frames:
         matched = by_frame[frame.id]
         if len(matched) == 1 and len(by_asset[matched[0].id]) == 1:
-            found.append(_make_candidate(STATUS_READY, frame, matched[0], "ファイル名の役割語が一致", 0.9))
+            found.append(_make_candidate(STATUS_REVIEW, frame, matched[0], "ファイル名の役割語が一致", 0.4))
             taken_assets.add(matched[0].id)
             taken_frames.add(frame.id)
         elif len(matched) > 1:

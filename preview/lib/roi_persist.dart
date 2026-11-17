@@ -840,6 +840,196 @@ Future<void> openPptxPreview({
 }
 
 /// 撮像スライドのページタイトルを保存する。
+Future<List<String>> registerOrderedAssets({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  required String payload,
+}) async {
+  final result = await runReportCommand(pythonExecutable, [
+    '-m',
+    'smart_report_builder.roi_edit',
+    'register-ordered',
+    projectPath,
+    '--payload',
+    payload,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ]);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '一覧を登録できません' : message);
+  }
+  return [
+    for (final line in '${result.stdout}'.split(RegExp(r'\r?\n')))
+      if (line.startsWith('asset ')) line.substring('asset '.length).trim(),
+  ];
+}
+
+Future<void> saveAssignmentRule({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  required String payload,
+}) async {
+  final result = await runReportCommand(pythonExecutable, [
+    '-m',
+    'smart_report_builder.roi_edit',
+    'set-assignment-rule',
+    projectPath,
+    '--payload',
+    payload,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ]);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '割付ルールを保存できません' : message);
+  }
+}
+
+class OrderedCandidate {
+  const OrderedCandidate({
+    required this.slideOrdinal,
+    required this.slideId,
+    required this.frameIndex,
+    required this.elementId,
+    required this.itemNumber,
+    required this.assetId,
+    required this.assetName,
+    required this.status,
+    required this.label,
+    required this.reason,
+  });
+
+  final int slideOrdinal;
+  final String slideId;
+  final int frameIndex;
+  final String elementId;
+  final int itemNumber;
+  final String? assetId;
+  final String assetName;
+  final String status;
+  final String label;
+  final String reason;
+
+  String get key => '$slideOrdinal:$frameIndex';
+}
+
+class OrderedProposal {
+  const OrderedProposal({required this.warnings, required this.candidates});
+
+  final List<String> warnings;
+  final List<OrderedCandidate> candidates;
+}
+
+OrderedProposal parseOrderedProposal(String stdout) {
+  final line = stdout
+      .split(RegExp(r'\r?\n'))
+      .map((item) => item.trim())
+      .lastWhere((item) => item.startsWith('{'), orElse: () => '');
+  if (line.isEmpty) {
+    return const OrderedProposal(warnings: [], candidates: []);
+  }
+  final decoded = jsonDecode(line);
+  if (decoded is! Map) {
+    throw const FormatException('割付候補を読めません');
+  }
+  final warnings = [
+    for (final item in decoded['warnings'] as List? ?? const []) item.toString(),
+  ];
+  final candidates = <OrderedCandidate>[];
+  for (final item in decoded['candidates'] as List? ?? const []) {
+    if (item is! Map) {
+      continue;
+    }
+    candidates.add(
+      OrderedCandidate(
+        slideOrdinal: (item['slideOrdinal'] as num).toInt(),
+        slideId: item['slideId']?.toString() ?? '',
+        frameIndex: (item['frameIndex'] as num).toInt(),
+        elementId: item['elementId']?.toString() ?? '',
+        itemNumber: (item['itemNumber'] as num).toInt(),
+        assetId: item['assetId']?.toString(),
+        assetName: item['assetName']?.toString() ?? '',
+        status: item['status']?.toString() ?? '',
+        label: item['label']?.toString() ?? '',
+        reason: item['reason']?.toString() ?? '',
+      ),
+    );
+  }
+  return OrderedProposal(warnings: warnings, candidates: candidates);
+}
+
+Future<OrderedProposal> proposeOrderedAssignment({
+  required String pythonExecutable,
+  required String projectPath,
+  required String group,
+  required String task,
+  required String listName,
+}) async {
+  final result = await runReportCommand(pythonExecutable, [
+    '-m',
+    'smart_report_builder.roi_edit',
+    'propose-ordered',
+    projectPath,
+    '--group',
+    group,
+    '--task',
+    task,
+    '--list-name',
+    listName,
+  ]);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '割付候補を作れません' : message);
+  }
+  return parseOrderedProposal('${result.stdout}');
+}
+
+Future<void> acceptOrderedAssignment({
+  required String pythonExecutable,
+  required String projectPath,
+  required String layoutPath,
+  required String pptxPath,
+  required String group,
+  required String task,
+  required String listName,
+  int? ordinal,
+  int? frame,
+}) async {
+  final arguments = <String>[
+    '-m',
+    'smart_report_builder.roi_edit',
+    'accept-ordered',
+    projectPath,
+    '--group',
+    group,
+    '--task',
+    task,
+    '--list-name',
+    listName,
+    '--layout',
+    layoutPath,
+    '--pptx',
+    pptxPath,
+  ];
+  if (ordinal != null && frame != null) {
+    arguments.addAll(['--ordinal', '$ordinal', '--frame', '$frame']);
+  }
+  final result = await runReportCommand(pythonExecutable, arguments);
+  if (result.exitCode != 0) {
+    final message = '${result.stderr}'.trim();
+    throw FormatException(message.isEmpty ? '割付候補を採用できません' : message);
+  }
+}
+
 Future<void> setSlideFinding({
   required String pythonExecutable,
   required String projectPath,

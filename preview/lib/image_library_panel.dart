@@ -18,6 +18,7 @@ class ImageLibraryPanel extends StatelessWidget {
     required this.onOpenDefaultVtv,
     required this.onPickVtv,
     required this.onAddTaskFile,
+    required this.onRegisterList,
     required this.onRemoveSource,
     required this.onClear,
     required this.loadArchiveBytes,
@@ -39,6 +40,7 @@ class ImageLibraryPanel extends StatelessWidget {
   final VoidCallback? onOpenDefaultVtv;
   final VoidCallback? onPickVtv;
   final VoidCallback? onAddTaskFile;
+  final VoidCallback? onRegisterList;
   final ValueChanged<String> onRemoveSource;
   final VoidCallback? onClear;
   final Future<Uint8List> Function(LibraryImage image) loadArchiveBytes;
@@ -103,6 +105,12 @@ class ImageLibraryPanel extends StatelessWidget {
                   label: 'タスクファイル',
                   tooltip: 'タスクファイルから、指定したグループとタスクを読み込みます',
                   onPressed: onAddTaskFile,
+                ),
+                _action(
+                  key: const Key('library-register-list'),
+                  label: '一覧を登録',
+                  tooltip: 'VTVとタスクファイルの並びを、枠へ入れずに素材へ残します',
+                  onPressed: onRegisterList,
                 ),
                 if (sources.isNotEmpty)
                   _action(
