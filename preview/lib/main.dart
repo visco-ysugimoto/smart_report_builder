@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:smart_report_preview/image_library.dart';
 import 'package:smart_report_preview/image_library_panel.dart';
+import 'package:smart_report_preview/ordered_expand_bar.dart';
 import 'package:smart_report_preview/ordered_lists.dart';
 import 'package:smart_report_preview/layout_path.dart';
 import 'package:smart_report_preview/layout_result.dart';
@@ -124,27 +125,19 @@ class _PreviewHomeState extends State<PreviewHome> {
   String? _taskPickerOrigin;
   final TextEditingController _taskGroup = TextEditingController(text: '1');
   final TextEditingController _taskNumber = TextEditingController(text: '1');
-  final TextEditingController _ruleOffset = TextEditingController(text: '1');
-  final TextEditingController _ruleStride = TextEditingController(text: '2');
+  final TextEditingController _ruleStride = TextEditingController(text: '1');
   final TextEditingController _rangeFrom = TextEditingController(text: '1');
   final TextEditingController _rangeTo = TextEditingController();
   final TextEditingController _titleTemplate = TextEditingController();
   final TextEditingController _captionTemplate = TextEditingController();
-  final TextEditingController _rulePerSlide = TextEditingController(text: '2');
-  final TextEditingController _ruleNumbers = TextEditingController(text: '1,2');
-  String _ruleMode = 'pattern';
   bool _pinThisSlide = false;
   final Map<String, TextEditingController> _frameItems = {};
   final Map<String, TextEditingController> _frameLabels = {};
   final Map<String, String> _frameLists = {};
   TextEditingController? _labelTarget;
-  bool _addMissingSlides = true;
   bool _overwriteLabels = false;
   int _slidesToAdd = 0;
   List<OrderedLabel> _orderedLabels = const [];
-  String _orderedGroup = '';
-  String _orderedTask = '';
-  String _orderedList = '';
   List<OrderedCandidate> _orderedCandidates = [];
   List<String> _orderedWarnings = [];
 
@@ -190,14 +183,11 @@ class _PreviewHomeState extends State<PreviewHome> {
     _datasetName.dispose();
     _taskGroup.dispose();
     _taskNumber.dispose();
-    _ruleOffset.dispose();
     _ruleStride.dispose();
     _rangeFrom.dispose();
     _rangeTo.dispose();
     _titleTemplate.dispose();
     _captionTemplate.dispose();
-    _rulePerSlide.dispose();
-    _ruleNumbers.dispose();
     for (final controller in _frameItems.values) {
       controller.dispose();
     }
@@ -4172,127 +4162,109 @@ class _PreviewHomeState extends State<PreviewHome> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const SizedBox(height: 8),
-        const Text('割付ルール'),
-        const Text('各枠の組み合わせを、指定したスライドへコピーします。番号は開始スライドの番号です。'),
+        const Text('割付'),
+        const Text('枠ごとにリストと番号を選び、スライドへ広げてから採用します。'),
         if (lists.isEmpty)
           const Text(
             '先に「一覧を登録」で、2つの txt の画像を素材にしてください。',
             key: Key('ordered-need-lists'),
           ),
-        TextField(
-          key: const Key('ordered-range-from'),
-          controller: _rangeFrom,
-          decoration: const InputDecoration(labelText: '開始スライド', isDense: true),
-          onChanged: (_) => setState(() {}),
-        ),
-        TextField(
-          key: const Key('ordered-range-to'),
-          controller: _rangeTo,
-          decoration: const InputDecoration(
-            labelText: '終了スライド',
-            isDense: true,
-            helperText: '空欄なら、リストが尽きるまで作ります',
-          ),
-          onChanged: (_) => setState(() {}),
-        ),
-        TextField(
-          key: const Key('ordered-stride'),
-          controller: _ruleStride,
-          decoration: const InputDecoration(
-            labelText: '次のスライドへ進む数',
-            isDense: true,
-            helperText: '1 なら各リストの 1,2,3…。2 なら 1,3,5…',
-          ),
-          onChanged: (_) => setState(() {}),
-        ),
         for (var index = 0; index < frames.length; index++)
           _frameRuleRow(frames[index], index, options, assets, ordinal),
-        const Text('ラベル'),
-        Wrap(
-          spacing: 4,
+        ExpansionTile(
+          key: const Key('ordered-details'),
+          tilePadding: EdgeInsets.zero,
+          title: const Text('詳細設定'),
           children: [
-            for (final variable in labelVariableHelp)
-              ActionChip(
-                key: Key('label-var:${variable.$1}'),
-                label: Text('${variable.$1} ${variable.$2}'),
-                onPressed: () => _insertLabelVariable(variable.$1),
+            TextField(
+              key: const Key('ordered-stride'),
+              controller: _ruleStride,
+              decoration: const InputDecoration(
+                labelText: '次のスライドへ進む数',
+                isDense: true,
+                helperText: '既定は 1。2 なら 1,3,5…',
               ),
+              onChanged: (_) => setState(() {}),
+            ),
+            TextField(
+              key: const Key('ordered-range-from'),
+              controller: _rangeFrom,
+              decoration: const InputDecoration(labelText: '開始スライド', isDense: true),
+              onChanged: (_) => setState(() {}),
+            ),
+            TextField(
+              key: const Key('ordered-range-to'),
+              controller: _rangeTo,
+              decoration: const InputDecoration(
+                labelText: '終了スライド',
+                isDense: true,
+                helperText: '空欄なら、リストが尽きるまで',
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+            CheckboxListTile(
+              key: const Key('ordered-pin-slide'),
+              contentPadding: EdgeInsets.zero,
+              value: _pinThisSlide,
+              onChanged: (value) => setState(() => _pinThisSlide = value ?? false),
+              title: const Text('このスライドだけ別の番号にする'),
+              controlAffinity: ListTileControlAffinity.leading,
+            ),
+            CheckboxListTile(
+              key: const Key('ordered-overwrite-labels'),
+              contentPadding: EdgeInsets.zero,
+              value: _overwriteLabels,
+              onChanged: (value) => setState(() => _overwriteLabels = value ?? false),
+              title: const Text('手入力したラベルも上書きする'),
+              controlAffinity: ListTileControlAffinity.leading,
+            ),
           ],
         ),
-        const Text('枠番号を付けると、その枠の値です。例: {comment2} {file2}'),
-        TextField(
-          key: const Key('ordered-title-template'),
-          controller: _titleTemplate,
-          decoration: const InputDecoration(
-            labelText: 'スライドタイトル',
-            isDense: true,
-            helperText: '例: 外観検査 {comment} No.{n} 良品',
-          ),
-          onTap: () => _labelTarget = _titleTemplate,
-          onChanged: (_) => setState(() {}),
-        ),
-        Text(
-          'タイトル: ${_previewTemplate(_titleTemplate.text, null)}',
-          key: const Key('ordered-title-preview'),
-        ),
-        TextField(
-          key: const Key('ordered-caption-template'),
-          controller: _captionTemplate,
-          decoration: const InputDecoration(
-            labelText: '説明文',
-            isDense: true,
-            helperText: '変数が無くても、そのままの文を入れられます',
-          ),
-          onTap: () => _labelTarget = _captionTemplate,
-          onChanged: (_) => setState(() {}),
-        ),
-        Text(
-          '説明文: ${_previewTemplate(_captionTemplate.text, null)}',
-          key: const Key('ordered-caption-preview'),
-        ),
-        CheckboxListTile(
-          key: const Key('ordered-pin-slide'),
-          contentPadding: EdgeInsets.zero,
-          value: _pinThisSlide,
-          onChanged: (value) => setState(() => _pinThisSlide = value ?? false),
-          title: const Text('このスライドだけ別の番号にする'),
-          controlAffinity: ListTileControlAffinity.leading,
-        ),
-        Wrap(
-          spacing: 8,
+        ExpansionTile(
+          key: const Key('ordered-labels-section'),
+          tilePadding: EdgeInsets.zero,
+          title: const Text('ラベル'),
           children: [
-            FilledButton(
-              key: const Key('ordered-expand'),
-              onPressed: _saving || frames.isEmpty || lists.isEmpty ? null : _onExpandAssignment,
-              child: const Text('スライドへ広げる'),
+            Wrap(
+              spacing: 4,
+              children: [
+                for (final variable in labelVariableHelp)
+                  ActionChip(
+                    key: Key('label-var:${variable.$1}'),
+                    label: Text('${variable.$1} ${variable.$2}'),
+                    onPressed: () => _insertLabelVariable(variable.$1),
+                  ),
+              ],
             ),
-            TextButton(
-              key: const Key('ordered-accept-all'),
-              onPressed: _saving ||
-                      (!_orderedCandidates.any((item) => item.status == 'ready') &&
-                          !_orderedLabels.any((item) => item.status == 'ready'))
-                  ? null
-                  : () => _onAcceptOrdered(),
-              child: const Text('すべて採用'),
+            const Text('枠番号を付けると、その枠の値です。例: {comment2}'),
+            TextField(
+              key: const Key('ordered-title-template'),
+              controller: _titleTemplate,
+              decoration: const InputDecoration(
+                labelText: 'スライドタイトル',
+                isDense: true,
+                helperText: '例: 外観検査 {comment} No.{n} 良品',
+              ),
+              onTap: () => _labelTarget = _titleTemplate,
+              onChanged: (_) => setState(() {}),
             ),
+            Text(
+              'タイトル: ${_previewTemplate(_titleTemplate.text, null)}',
+              key: const Key('ordered-title-preview'),
+            ),
+            TextField(
+              key: const Key('ordered-caption-template'),
+              controller: _captionTemplate,
+              decoration: const InputDecoration(labelText: '説明文', isDense: true),
+              onTap: () => _labelTarget = _captionTemplate,
+              onChanged: (_) => setState(() {}),
+            ),
+            Text(
+              '説明文: ${_previewTemplate(_captionTemplate.text, null)}',
+              key: const Key('ordered-caption-preview'),
+            ),
+            for (var index = 0; index < frames.length; index++) _frameLabelField(frames[index], index),
           ],
-        ),
-        if (_slidesToAdd > 0)
-          CheckboxListTile(
-            key: const Key('ordered-create-slides'),
-            contentPadding: EdgeInsets.zero,
-            value: _addMissingSlides,
-            onChanged: (value) => setState(() => _addMissingSlides = value ?? false),
-            title: Text('足りないスライドを $_slidesToAdd 枚追加する'),
-            controlAffinity: ListTileControlAffinity.leading,
-          ),
-        CheckboxListTile(
-          key: const Key('ordered-overwrite-labels'),
-          contentPadding: EdgeInsets.zero,
-          value: _overwriteLabels,
-          onChanged: (value) => setState(() => _overwriteLabels = value ?? false),
-          title: const Text('手入力したラベルも上書きする'),
-          controlAffinity: ListTileControlAffinity.leading,
         ),
         for (final warning in _orderedWarnings)
           Text(warning, key: Key('ordered-warning:$warning')),
@@ -4322,6 +4294,16 @@ class _PreviewHomeState extends State<PreviewHome> {
             'ラベル スライド${label.slideOrdinal + 1} ${label.kind} ${label.text} ${label.reason}',
             key: Key('ordered-label:${label.slideOrdinal}:${label.target}'),
           ),
+        OrderedExpandBar(
+          slidesToAdd: _visibleSlidesToAdd(),
+          canExpand: frames.isNotEmpty && lists.isNotEmpty,
+          canAccept: _orderedCandidates.any((item) => item.status == 'ready') ||
+              _orderedLabels.any((item) => item.status == 'ready'),
+          saving: _saving,
+          onExpand: _onExpandAssignment,
+          onAcceptAdding: () => _onAcceptOrdered(createSlides: true),
+          onAcceptExisting: () => _onAcceptOrdered(createSlides: false),
+        ),
       ],
     );
   }
@@ -4349,8 +4331,6 @@ class _PreviewHomeState extends State<PreviewHome> {
         ? const ResolvedPick(status: 'missing', name: '', reason: '指定した範囲の外です')
         : resolvePick(assets, parsed.$1, parsed.$2, shownNumber);
     final preview = resolved.status == 'ready' ? resolved.name : resolved.reason;
-    final labelController = _frameLabels.putIfAbsent(frame.elementId, () => TextEditingController());
-    final labelPreview = _previewTemplate(labelController.text, index);
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(
@@ -4379,23 +4359,41 @@ class _PreviewHomeState extends State<PreviewHome> {
             decoration: const InputDecoration(labelText: '番号', isDense: true),
             onChanged: (_) => setState(() {}),
           ),
-          TextField(
-            key: Key('frame-label:${frame.elementId}'),
-            controller: labelController,
-            decoration: const InputDecoration(labelText: 'この枠のラベル', isDense: true),
-            onTap: () => _labelTarget = labelController,
-            onChanged: (_) => setState(() {}),
-          ),
           Text(
             'このスライドでは $preview',
             key: Key('frame-preview:${frame.elementId}'),
           ),
-          Text(
-            'ラベル: $labelPreview',
-            key: Key('frame-label-preview:${frame.elementId}'),
-          ),
         ],
       ),
+    );
+  }
+
+  Widget _frameLabelField(PlacedElement frame, int index) {
+    final controller = _frameLabels.putIfAbsent(frame.elementId, () => TextEditingController());
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: Key('frame-label:${frame.elementId}'),
+          controller: controller,
+          decoration: InputDecoration(labelText: '${frame.displayName}のラベル', isDense: true),
+          onTap: () => _labelTarget = controller,
+          onChanged: (_) => setState(() {}),
+        ),
+        Text(
+          'ラベル: ${_previewTemplate(controller.text, index)}',
+          key: Key('frame-label-preview:${frame.elementId}'),
+        ),
+      ],
+    );
+  }
+
+  int _visibleSlidesToAdd() {
+    final have = _pages.isEmpty ? 1 : _pages.length;
+    return missingSlides(
+      reported: _slidesToAdd,
+      existingSlides: have,
+      candidateOrdinals: [for (final item in _orderedCandidates) item.slideOrdinal],
     );
   }
 
@@ -4608,9 +4606,7 @@ class _PreviewHomeState extends State<PreviewHome> {
         _orderedWarnings = proposal.warnings;
         _slidesToAdd = proposal.slidesToAdd;
         _unsaved = reportSession.dirty;
-        _status = proposal.slidesToAdd > 0
-            ? '候補を出しました。足りない ${proposal.slidesToAdd} 枚は、追加にチェックしてから採用します。'
-            : '候補をスライド分だけ出しました。すべて採用するまで枠は変わりません。';
+        _status = '候補を出しました。採用するまで枠は変わりません。';
       });
     } on FormatException catch (error) {
       if (mounted) {
@@ -4623,7 +4619,7 @@ class _PreviewHomeState extends State<PreviewHome> {
     }
   }
 
-  Future<void> _onAcceptOrdered({int? ordinal, int? frame}) async {
+  Future<void> _onAcceptOrdered({int? ordinal, int? frame, bool createSlides = true}) async {
     await _runProjectCommand(
       '割付候補を採用しています',
       (python, projectPath, layoutPath, pptxPath) => acceptOrderedAssignment(
@@ -4636,7 +4632,7 @@ class _PreviewHomeState extends State<PreviewHome> {
         listName: '',
         ordinal: ordinal,
         frame: frame,
-        createSlides: _addMissingSlides,
+        createSlides: createSlides,
         overwriteLabels: _overwriteLabels,
       ),
       ordinal == null ? '候補を採用しました。未割当の番号はそのままです。' : '選んだ候補を採用しました。',
