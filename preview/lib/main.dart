@@ -126,12 +126,22 @@ class _PreviewHomeState extends State<PreviewHome> {
   final TextEditingController _taskNumber = TextEditingController(text: '1');
   final TextEditingController _ruleOffset = TextEditingController(text: '1');
   final TextEditingController _ruleStride = TextEditingController(text: '2');
+  final TextEditingController _rangeFrom = TextEditingController(text: '1');
+  final TextEditingController _rangeTo = TextEditingController();
+  final TextEditingController _titleTemplate = TextEditingController();
+  final TextEditingController _captionTemplate = TextEditingController();
   final TextEditingController _rulePerSlide = TextEditingController(text: '2');
   final TextEditingController _ruleNumbers = TextEditingController(text: '1,2');
   String _ruleMode = 'pattern';
   bool _pinThisSlide = false;
   final Map<String, TextEditingController> _frameItems = {};
+  final Map<String, TextEditingController> _frameLabels = {};
   final Map<String, String> _frameLists = {};
+  TextEditingController? _labelTarget;
+  bool _addMissingSlides = true;
+  bool _overwriteLabels = false;
+  int _slidesToAdd = 0;
+  List<OrderedLabel> _orderedLabels = const [];
   String _orderedGroup = '';
   String _orderedTask = '';
   String _orderedList = '';
@@ -182,9 +192,16 @@ class _PreviewHomeState extends State<PreviewHome> {
     _taskNumber.dispose();
     _ruleOffset.dispose();
     _ruleStride.dispose();
+    _rangeFrom.dispose();
+    _rangeTo.dispose();
+    _titleTemplate.dispose();
+    _captionTemplate.dispose();
     _rulePerSlide.dispose();
     _ruleNumbers.dispose();
     for (final controller in _frameItems.values) {
+      controller.dispose();
+    }
+    for (final controller in _frameLabels.values) {
       controller.dispose();
     }
     _pageTitle.dispose();
@@ -404,7 +421,9 @@ class _PreviewHomeState extends State<PreviewHome> {
         _candidates = candidates;
         _candidateKey = _keptCandidate(candidates);
         _orderedCandidates = [];
+        _orderedLabels = const [];
         _orderedWarnings = [];
+        _slidesToAdd = 0;
         _datasets = datasets;
         _datasetId = _keptDataset(datasets);
         _pages = pages.pages;
@@ -4093,6 +4112,52 @@ class _PreviewHomeState extends State<PreviewHome> {
     return reportSession.projectJson ?? '';
   }
 
+  Future<void> _onRegisterLibraryList() async {
+    final records = <Map<String, Object?>>[];
+    for (final source in _librarySources) {
+      if (source.kind != LibrarySourceKind.vtv && source.kind != LibrarySourceKind.taskFile) {
+        continue;
+      }
+      for (final group in source.groups) {
+        for (final image in group.images) {
+          if (image.listIndex == null) {
+            continue;
+          }
+          final path = image.filePath ?? await _materializeLibraryImage(image);
+          if (!mounted || path == null) {
+            return;
+          }
+          records.add({
+            'path': path,
+            'source': image.source,
+            'group': image.group,
+            'task': image.task,
+            'listName': image.listName,
+            'listComment': image.listComment,
+            'listIndex': image.listIndex,
+            'fileName': image.name,
+            if (image.note.isNotEmpty) 'note': image.note,
+          });
+        }
+      }
+    }
+    if (records.isEmpty) {
+      setState(() => _error = 'VTVかタスクファイルの一覧を読み込んでから登録してください');
+      return;
+    }
+    await _runProjectCommand(
+      '一覧を素材にしています',
+      (python, projectPath, layoutPath, pptxPath) => registerOrderedAssets(
+        pythonExecutable: python,
+        projectPath: projectPath,
+        layoutPath: layoutPath,
+        pptxPath: pptxPath,
+        payload: jsonEncode(records),
+      ),
+      '並びを素材に残しました。枠へはまだ入れていません。',
+    );
+  }
+
   Widget _orderedRulePanel() {
     if (_result == null) {
       return const SizedBox.shrink();
@@ -4108,12 +4173,28 @@ class _PreviewHomeState extends State<PreviewHome> {
       children: [
         const SizedBox(height: 8),
         const Text('割付ルール'),
-        const Text('各枠に、リストと番号を指定します。Comment= が無いリストは txt 名で出します。'),
+        const Text('各枠の組み合わせを、指定したスライドへコピーします。番号は開始スライドの番号です。'),
         if (lists.isEmpty)
           const Text(
             '先に「一覧を登録」で、2つの txt の画像を素材にしてください。',
             key: Key('ordered-need-lists'),
           ),
+        TextField(
+          key: const Key('ordered-range-from'),
+          controller: _rangeFrom,
+          decoration: const InputDecoration(labelText: '開始スライド', isDense: true),
+          onChanged: (_) => setState(() {}),
+        ),
+        TextField(
+          key: const Key('ordered-range-to'),
+          controller: _rangeTo,
+          decoration: const InputDecoration(
+            labelText: '終了スライド',
+            isDense: true,
+            helperText: '空欄なら、リストが尽きるまで作ります',
+          ),
+          onChanged: (_) => setState(() {}),
+        ),
         TextField(
           key: const Key('ordered-stride'),
           controller: _ruleStride,
@@ -4122,9 +4203,53 @@ class _PreviewHomeState extends State<PreviewHome> {
             isDense: true,
             helperText: '1 なら各リストの 1,2,3…。2 なら 1,3,5…',
           ),
+          onChanged: (_) => setState(() {}),
         ),
         for (var index = 0; index < frames.length; index++)
           _frameRuleRow(frames[index], index, options, assets, ordinal),
+        const Text('ラベル'),
+        Wrap(
+          spacing: 4,
+          children: [
+            for (final variable in labelVariableHelp)
+              ActionChip(
+                key: Key('label-var:${variable.$1}'),
+                label: Text('${variable.$1} ${variable.$2}'),
+                onPressed: () => _insertLabelVariable(variable.$1),
+              ),
+          ],
+        ),
+        const Text('枠番号を付けると、その枠の値です。例: {comment2} {file2}'),
+        TextField(
+          key: const Key('ordered-title-template'),
+          controller: _titleTemplate,
+          decoration: const InputDecoration(
+            labelText: 'スライドタイトル',
+            isDense: true,
+            helperText: '例: 外観検査 {comment} No.{n} 良品',
+          ),
+          onTap: () => _labelTarget = _titleTemplate,
+          onChanged: (_) => setState(() {}),
+        ),
+        Text(
+          'タイトル: ${_previewTemplate(_titleTemplate.text, null)}',
+          key: const Key('ordered-title-preview'),
+        ),
+        TextField(
+          key: const Key('ordered-caption-template'),
+          controller: _captionTemplate,
+          decoration: const InputDecoration(
+            labelText: '説明文',
+            isDense: true,
+            helperText: '変数が無くても、そのままの文を入れられます',
+          ),
+          onTap: () => _labelTarget = _captionTemplate,
+          onChanged: (_) => setState(() {}),
+        ),
+        Text(
+          '説明文: ${_previewTemplate(_captionTemplate.text, null)}',
+          key: const Key('ordered-caption-preview'),
+        ),
         CheckboxListTile(
           key: const Key('ordered-pin-slide'),
           contentPadding: EdgeInsets.zero,
@@ -4143,12 +4268,31 @@ class _PreviewHomeState extends State<PreviewHome> {
             ),
             TextButton(
               key: const Key('ordered-accept-all'),
-              onPressed: _saving || !_orderedCandidates.any((item) => item.status == 'ready')
+              onPressed: _saving ||
+                      (!_orderedCandidates.any((item) => item.status == 'ready') &&
+                          !_orderedLabels.any((item) => item.status == 'ready'))
                   ? null
                   : () => _onAcceptOrdered(),
               child: const Text('すべて採用'),
             ),
           ],
+        ),
+        if (_slidesToAdd > 0)
+          CheckboxListTile(
+            key: const Key('ordered-create-slides'),
+            contentPadding: EdgeInsets.zero,
+            value: _addMissingSlides,
+            onChanged: (value) => setState(() => _addMissingSlides = value ?? false),
+            title: Text('足りないスライドを $_slidesToAdd 枚追加する'),
+            controlAffinity: ListTileControlAffinity.leading,
+          ),
+        CheckboxListTile(
+          key: const Key('ordered-overwrite-labels'),
+          contentPadding: EdgeInsets.zero,
+          value: _overwriteLabels,
+          onChanged: (value) => setState(() => _overwriteLabels = value ?? false),
+          title: const Text('手入力したラベルも上書きする'),
+          controlAffinity: ListTileControlAffinity.leading,
         ),
         for (final warning in _orderedWarnings)
           Text(warning, key: Key('ordered-warning:$warning')),
@@ -4158,7 +4302,8 @@ class _PreviewHomeState extends State<PreviewHome> {
               Expanded(
                 child: Text(
                   '${candidate.label} スライド${candidate.slideOrdinal + 1} 枠${candidate.frameIndex + 1} '
-                  '#${candidate.itemNumber} ${candidate.assetName} ${candidate.reason}',
+                  '#${candidate.itemNumber} ${candidate.assetName} ${candidate.reason}'
+                  '${candidate.caption.isEmpty ? '' : ' ラベル ${candidate.caption}'}',
                   key: Key('ordered-line:${candidate.key}'),
                 ),
               ),
@@ -4171,6 +4316,11 @@ class _PreviewHomeState extends State<PreviewHome> {
                   child: const Text('この候補を採用'),
                 ),
             ],
+          ),
+        for (final label in _orderedLabels)
+          Text(
+            'ラベル スライド${label.slideOrdinal + 1} ${label.kind} ${label.text} ${label.reason}',
+            key: Key('ordered-label:${label.slideOrdinal}:${label.target}'),
           ),
       ],
     );
@@ -4194,11 +4344,13 @@ class _PreviewHomeState extends State<PreviewHome> {
     final itemController = _frameItems.putIfAbsent(frame.elementId, () => TextEditingController(text: '1'));
     final itemNumber = int.tryParse(itemController.text.trim()) ?? 1;
     final parsed = _splitListChoice(selected ?? '');
-    final shownNumber = itemNumber + ordinal * (int.tryParse(_ruleStride.text.trim()) ?? 1);
-    final resolved = parsed == null
-        ? const ResolvedPick(status: 'missing', name: '', reason: 'リストがありません')
+    final shownNumber = _itemOnSlide(itemNumber, ordinal);
+    final resolved = parsed == null || shownNumber == null
+        ? const ResolvedPick(status: 'missing', name: '', reason: '指定した範囲の外です')
         : resolvePick(assets, parsed.$1, parsed.$2, shownNumber);
     final preview = resolved.status == 'ready' ? resolved.name : resolved.reason;
+    final labelController = _frameLabels.putIfAbsent(frame.elementId, () => TextEditingController());
+    final labelPreview = _previewTemplate(labelController.text, index);
     return Padding(
       padding: const EdgeInsets.only(top: 8),
       child: Column(
@@ -4227,13 +4379,139 @@ class _PreviewHomeState extends State<PreviewHome> {
             decoration: const InputDecoration(labelText: '番号', isDense: true),
             onChanged: (_) => setState(() {}),
           ),
+          TextField(
+            key: Key('frame-label:${frame.elementId}'),
+            controller: labelController,
+            decoration: const InputDecoration(labelText: 'この枠のラベル', isDense: true),
+            onTap: () => _labelTarget = labelController,
+            onChanged: (_) => setState(() {}),
+          ),
           Text(
             'このスライドでは $preview',
             key: Key('frame-preview:${frame.elementId}'),
           ),
+          Text(
+            'ラベル: $labelPreview',
+            key: Key('frame-label-preview:${frame.elementId}'),
+          ),
         ],
       ),
     );
+  }
+
+  int? _itemOnSlide(int base, int ordinal) {
+    final from = int.tryParse(_rangeFrom.text.trim()) ?? 1;
+    final origin = from < 1 ? 0 : from - 1;
+    final end = int.tryParse(_rangeTo.text.trim());
+    if (ordinal < origin || (end != null && ordinal > end - 1)) {
+      return null;
+    }
+    final step = int.tryParse(_ruleStride.text.trim()) ?? 1;
+    return base + (ordinal - origin) * step;
+  }
+
+  void _insertLabelVariable(String token) {
+    final controller = _labelTarget ?? _titleTemplate;
+    final text = controller.text;
+    final selection = controller.selection;
+    final start = selection.start >= 0 ? selection.start : text.length;
+    final end = selection.end >= start ? selection.end : start;
+    final next = text.replaceRange(start, end, token);
+    controller.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: start + token.length),
+    );
+    setState(() => _labelTarget = controller);
+  }
+
+  String _previewTemplate(String template, int? focus) {
+    if (template.trim().isEmpty) {
+      return '';
+    }
+    final assets = parseOrderedAssets(_projectBody());
+    final frames = _containFrames(_result);
+    final ordinal = _activeOrdinal();
+    final extra = <String, String>{};
+    OrderedAsset? focused;
+    for (var index = 0; index < frames.length; index++) {
+      final frame = frames[index];
+      final parsed = _splitListChoice(_frameLists[frame.elementId] ?? '');
+      final number = _itemOnSlide(int.tryParse(_frameItems[frame.elementId]?.text.trim() ?? '') ?? 1, ordinal);
+      OrderedAsset? asset;
+      if (parsed != null && number != null) {
+        asset = _assetFor(assets, parsed.$1, parsed.$2, number);
+      }
+      if (focus == null && index == 0) {
+        focused = asset;
+      }
+      if (focus == index) {
+        focused = asset;
+      }
+      final suffix = '${index + 1}';
+      extra['comment$suffix'] = asset?.listComment ?? '';
+      extra['note$suffix'] = asset?.note ?? '';
+      extra['txt$suffix'] = asset?.listName ?? '';
+      extra['file$suffix'] = asset?.fileName.isNotEmpty == true ? asset!.fileName : (asset?.name ?? '');
+      extra['index$suffix'] = number == null ? '' : '$number';
+      extra['n$suffix'] = number == null ? '' : '$number';
+      extra['group$suffix'] = asset?.group ?? '';
+      extra['task$suffix'] = asset?.task ?? '';
+    }
+    final rendered = renderLabel(
+      template,
+      comment: focused?.listComment ?? '',
+      note: focused?.note ?? '',
+      txt: focused?.listName ?? '',
+      file: focused?.fileName.isNotEmpty == true ? focused!.fileName : (focused?.name ?? ''),
+      index: focused == null ? '' : '${focused.listIndex}',
+      slide: '${ordinal + 1}',
+      group: focused?.group ?? '',
+      task: focused?.task ?? '',
+      extra: extra,
+    );
+    if (rendered.missing.isEmpty) {
+      return rendered.text;
+    }
+    final names = rendered.missing.map((name) => '{$name}').join('、');
+    return '${rendered.text}（$names は空）';
+  }
+
+  OrderedAsset? _assetFor(List<OrderedAsset> assets, String listBy, String listKey, int itemNumber) {
+    final lists = _matchingLists(catalogLists(assets), listBy, listKey);
+    if (lists.length != 1) {
+      return null;
+    }
+    final list = lists.single;
+    final found = [
+      for (final asset in assets)
+        if (asset.listIndex == itemNumber &&
+            asset.group == list.group &&
+            asset.task == list.task &&
+            asset.listName == list.listName &&
+            asset.listComment == list.listComment)
+          asset,
+    ];
+    return found.length == 1 ? found.single : null;
+  }
+
+  List<CatalogList> _matchingLists(List<CatalogList> lists, String listBy, String listKey) {
+    if (listBy == 'position') {
+      return [for (final list in lists) if ('${list.taskPosition}' == listKey) list];
+    }
+    if (listBy == 'name') {
+      return [for (final list in lists) if (list.listName == listKey) list];
+    }
+    final byComment = [
+      for (final list in lists)
+        if (list.listComment.isNotEmpty && list.listComment == listKey) list,
+    ];
+    if (byComment.isNotEmpty) {
+      return byComment;
+    }
+    return [
+      for (final list in lists)
+        if (list.listComment.isEmpty && list.listName == listKey) list,
+    ];
   }
 
   (String, String)? _splitListChoice(String value) {
@@ -4257,23 +4535,40 @@ class _PreviewHomeState extends State<PreviewHome> {
       if (parsed == null || base < 1) {
         continue;
       }
+      final label = _frameLabels[frame.elementId]?.text ?? '';
       pattern.add({
         'elementId': frame.elementId,
         'frameIndex': index,
         'listBy': parsed.$1,
         'listKey': parsed.$2,
         'itemNumber': base,
+        'labelTemplate': label,
       });
       overrideFrames.add({
         'elementId': frame.elementId,
         'frameIndex': index,
         'listBy': parsed.$1,
         'listKey': parsed.$2,
-        'itemNumber': base + ordinal * step,
+        'itemNumber': _itemOnSlide(base, ordinal) ?? base,
+        'labelTemplate': label,
       });
     }
+    final texts = [
+      for (final element in _result?.elements ?? const <PlacedElement>[])
+        if (element.kind == 'text') element,
+    ];
+    final caption = texts.where((element) => element.roleId == 'caption');
+    final captionId = caption.isEmpty ? (texts.isEmpty ? '' : texts.first.elementId) : caption.first.elementId;
+    final rangeTo = int.tryParse(_rangeTo.text.trim());
     return {
       'step': step,
+      'rangeFrom': int.tryParse(_rangeFrom.text.trim()) ?? 1,
+      if (rangeTo != null) 'rangeTo': rangeTo,
+      'titleTemplate': _titleTemplate.text,
+      if (_captionTemplate.text.trim().isNotEmpty)
+        'textTemplates': [
+          {'elementId': captionId, 'template': _captionTemplate.text},
+        ],
       'pattern': pattern,
       if (_pinThisSlide)
         'overrides': [
@@ -4309,9 +4604,13 @@ class _PreviewHomeState extends State<PreviewHome> {
       }
       setState(() {
         _orderedCandidates = proposal.candidates;
+        _orderedLabels = proposal.labels;
         _orderedWarnings = proposal.warnings;
+        _slidesToAdd = proposal.slidesToAdd;
         _unsaved = reportSession.dirty;
-        _status = '候補をスライド分だけ出しました。すべて採用するまで枠は変わりません。';
+        _status = proposal.slidesToAdd > 0
+            ? '候補を出しました。足りない ${proposal.slidesToAdd} 枚は、追加にチェックしてから採用します。'
+            : '候補をスライド分だけ出しました。すべて採用するまで枠は変わりません。';
       });
     } on FormatException catch (error) {
       if (mounted) {
@@ -4337,6 +4636,8 @@ class _PreviewHomeState extends State<PreviewHome> {
         listName: '',
         ordinal: ordinal,
         frame: frame,
+        createSlides: _addMissingSlides,
+        overwriteLabels: _overwriteLabels,
       ),
       ordinal == null ? '候補を採用しました。未割当の番号はそのままです。' : '選んだ候補を採用しました。',
     );

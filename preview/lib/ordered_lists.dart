@@ -9,6 +9,8 @@ class OrderedAsset {
     required this.listName,
     required this.listComment,
     required this.listIndex,
+    this.note = '',
+    this.fileName = '',
   });
 
   final String id;
@@ -18,6 +20,8 @@ class OrderedAsset {
   final String listName;
   final String listComment;
   final int listIndex;
+  final String note;
+  final String fileName;
 }
 
 class CatalogList {
@@ -89,6 +93,8 @@ List<OrderedAsset> parseOrderedAssets(String? projectJson) {
         listName: '${item['listName'] ?? ''}',
         listComment: '${item['listComment'] ?? ''}',
         listIndex: (item['listIndex'] as num).toInt(),
+        note: '${item['note'] ?? ''}',
+        fileName: '${item['fileName'] ?? ''}',
       ),
     );
   }
@@ -205,4 +211,60 @@ List<CatalogList> _matching(List<CatalogList> lists, String listBy, String listK
     for (final list in lists)
       if (list.listComment.isEmpty && list.listName == listKey) list,
   ];
+}
+
+const labelVariableHelp = <(String, String)>[
+  ('{comment}', '一覧の Comment='),
+  ('{note}', 'その画像のコメント'),
+  ('{txt}', 'txt のファイル名'),
+  ('{file}', 'FILE= のファイル名'),
+  ('{n}', 'FILE= の番号'),
+  ('{index}', 'FILE= の番号'),
+  ('{slide}', 'スライド番号'),
+  ('{group}', 'グループ'),
+  ('{task}', 'タスク'),
+];
+
+class RenderedLabel {
+  const RenderedLabel(this.text, this.missing);
+
+  final String text;
+  final List<String> missing;
+}
+
+RenderedLabel renderLabel(
+  String template, {
+  String comment = '',
+  String note = '',
+  String txt = '',
+  String file = '',
+  String index = '',
+  String slide = '',
+  String group = '',
+  String task = '',
+  Map<String, String> extra = const {},
+}) {
+  final values = <String, String>{
+    'comment': comment,
+    'note': note,
+    'txt': txt,
+    'file': file,
+    'index': index,
+    'n': index,
+    'slide': slide,
+    'group': group,
+    'task': task,
+    ...extra,
+  };
+  final missing = <String>[];
+  final text = template.replaceAllMapped(RegExp(r'\{([A-Za-z0-9_]+)\}'), (match) {
+    final key = match.group(1) ?? '';
+    final value = values[key] ?? '';
+    if (value.isEmpty) {
+      missing.add(key);
+      return '';
+    }
+    return value;
+  });
+  return RenderedLabel(text, missing);
 }

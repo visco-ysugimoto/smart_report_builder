@@ -2157,6 +2157,8 @@ def _accept_ordered(argv: list[str]) -> int:
     parser.add_argument("--list-name", default="")
     parser.add_argument("--ordinal", type=int)
     parser.add_argument("--frame", type=int)
+    parser.add_argument("--create-slides", default="yes")
+    parser.add_argument("--overwrite-labels", default="no")
     parser.add_argument("--layout")
     parser.add_argument("--pptx")
     args = parser.parse_args(argv)
@@ -2169,6 +2171,8 @@ def _accept_ordered(argv: list[str]) -> int:
             list_name=args.list_name,
             slide_ordinal=args.ordinal,
             frame_index=args.frame,
+            create_slides=args.create_slides != "no",
+            overwrite_labels=args.overwrite_labels == "yes",
         )
         if applied or args.ordinal is None:
             _save_outputs(project, args.project, args.layout, args.pptx)

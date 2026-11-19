@@ -55,6 +55,7 @@ void main() {
     );
     expect(parsed.listComment, '外観 / 端部');
     expect(parsed.refs, ['a.bmp']);
+    expect(parsed.fileNotes, isEmpty);
     final groups = arrangeImageGroups(
       baseLabel: 'g01/03',
       names: ['a.bmp', 'b.bmp'],
@@ -63,6 +64,18 @@ void main() {
     expect(groups.single.label, 'g01/03 / 外観 / 端部');
     expect(groups.single.listName, 'cap');
     expect(groups.single.names, ['a.bmp', 'b.bmp']);
+  });
+
+  test('keeps a comment written after FILE= on that image', () {
+    final parsed = parseTaskListText(
+      'Comment=外観\nFILE=a.bmp\nComment=端部の傷\nFILE=b.bmp\nComment=良品\nnote=ignored\n'.codeUnits,
+      listName: 'cap',
+    );
+
+    expect(parsed.listComment, '外観');
+    expect(parsed.refs, ['a.bmp', 'b.bmp']);
+    expect(parsed.fileNotes['a.bmp'], '端部の傷');
+    expect(parsed.fileNotes['b.bmp'], '良品');
   });
 
   test('labels a viscotech task image as group/task', () {

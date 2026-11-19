@@ -461,7 +461,7 @@ def _place_image(
             display_name=node.display_name,
             frame=rect,
             content_rect=content,
-            text=None,
+            text=None if binding is None else binding.text,
             asset_path=asset_path,
             fit_mode=FitMode.CONTAIN.value,
             group_frame=group,

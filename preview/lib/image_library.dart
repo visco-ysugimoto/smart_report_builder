@@ -37,6 +37,7 @@ class LibraryImage {
     this.listName = '',
     this.listComment,
     this.listIndex,
+    this.note = '',
     this.source = '',
   });
 
@@ -50,6 +51,7 @@ class LibraryImage {
   final String listName;
   final String? listComment;
   final int? listIndex;
+  final String note;
   final String source;
 }
 
@@ -95,6 +97,7 @@ class NamedGroup {
     this.listName = '',
     this.listComment,
     this.indexes = const {},
+    this.notes = const {},
   });
 
   final String label;
@@ -102,6 +105,7 @@ class NamedGroup {
   final String listName;
   final String? listComment;
   final Map<String, int> indexes;
+  final Map<String, String> notes;
 }
 
 class TaskReference {
@@ -109,11 +113,14 @@ class TaskReference {
     required this.listName,
     required this.refs,
     this.listComment,
+    this.fileNotes = const {},
   });
 
   final String listName;
   final String? listComment;
   final List<String> refs;
+  /// FILE= のあとに書かれた Comment=。キーは FILE= の表記。
+  final Map<String, String> fileNotes;
 
   String displayName(String baseLabel) {
     final comment = listComment?.trim() ?? '';
@@ -194,6 +201,7 @@ List<NamedGroup> arrangeImageGroups({
         listName: reference.listName,
         listComment: comment.isEmpty ? null : comment,
         indexes: _fileOrderIndexes(names, reference.refs),
+        notes: _notesForNames(names, reference.fileNotes),
       ),
     ];
   }
@@ -218,6 +226,7 @@ List<NamedGroup> arrangeImageGroups({
           listName: reference.listName,
           listComment: reference.listComment,
           indexes: _fileOrderIndexes(names, reference.refs),
+          notes: _notesForNames(ordered, reference.fileNotes),
         ),
       );
     }
@@ -233,18 +242,27 @@ List<NamedGroup> arrangeImageGroups({
   return groups;
 }
 
-/// Comment= は先頭から順に、空でない値を「 / 」でつなぐ。FILE= 以外は使わない。
+/// 最初の FILE= より前の Comment= は一覧名。FILE= のあと次の FILE= までの Comment= はその画像のコメント。
+/// それ以外の行は使わない。
 TaskReference parseTaskListText(List<int> bytes, {String listName = ''}) {
   final text = _decodeTaskText(bytes);
   final comments = <String>[];
   final files = <String>[];
+  final notes = <String, List<String>>{};
+  String? currentFile;
+  var seenFile = false;
   for (final line in text.split(RegExp(r'\r?\n'))) {
     final commentAt = line.indexOf('Comment=');
     final fileAt = line.indexOf('FILE=');
     if (commentAt >= 0 && (fileAt < 0 || commentAt < fileAt)) {
       final value = line.substring(commentAt + 'Comment='.length).trim();
-      if (value.isNotEmpty) {
+      if (value.isEmpty) {
+        continue;
+      }
+      if (!seenFile || currentFile == null) {
         comments.add(value);
+      } else {
+        notes.putIfAbsent(currentFile, () => []).add(value);
       }
       continue;
     }
@@ -252,15 +270,36 @@ TaskReference parseTaskListText(List<int> bytes, {String listName = ''}) {
       continue;
     }
     final name = line.substring(fileAt + 'FILE='.length).trim();
-    if (name.isNotEmpty) {
-      files.add(name);
+    if (name.isEmpty) {
+      continue;
     }
+    seenFile = true;
+    currentFile = name;
+    files.add(name);
   }
   return TaskReference(
     listName: listName,
     listComment: comments.isEmpty ? null : comments.join(' / '),
     refs: files,
+    fileNotes: {
+      for (final entry in notes.entries) entry.key: entry.value.join(' / '),
+    },
   );
+}
+
+Map<String, String> _notesForNames(List<String> names, Map<String, String> fileNotes) {
+  if (fileNotes.isEmpty) {
+    return const {};
+  }
+  final byBase = <String, String>{};
+  for (final entry in fileNotes.entries) {
+    byBase[libraryBaseName(entry.key).toLowerCase()] = entry.value;
+  }
+  return {
+    for (final name in names)
+      if (byBase.containsKey(libraryBaseName(name).toLowerCase()))
+        name: byBase[libraryBaseName(name).toLowerCase()]!,
+  };
 }
 
 List<String> parseFileReferences(List<int> bytes) {
@@ -728,6 +767,7 @@ LibraryImage _orderedImage({
     listName: arranged.listName,
     listComment: arranged.listComment,
     listIndex: listIndex,
+    note: arranged.notes[storedName] ?? '',
     source: source,
   );
 }

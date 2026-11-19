@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from smart_report_builder.layout import layout_slide
 from smart_report_builder.models import (
     SCHEMA_VERSION,
     AssignmentRule,
@@ -11,9 +12,11 @@ from smart_report_builder.models import (
     FrameMapping,
     FrameRef,
     SlideOverride,
+    TextTemplate,
     project_from_dict,
     project_to_dict,
 )
+from smart_report_builder.pptx_writer import write_pptx
 from smart_report_builder.ordered_assignment import (
     accept_ordered_assignment,
     expand_assignment,
@@ -258,6 +261,104 @@ def test_step_override_and_duplicate_comment(tmp_path: Path):
     migrated = project_from_dict(saved)
     assert migrated.content_master.assignment_rule.pattern[0].list_by == "position"
     assert migrated.content_master.assignment_rule.step == 2
+
+
+def test_list_length_creates_the_slides_a_two_frame_pattern_needs(tmp_path: Path):
+    project = create_report(image_count=2)
+    _load_named_list(project, tmp_path, "outer", "外観", 6)
+    rule = AssignmentRule(
+        step=2,
+        pattern=[
+            FrameRef("frame-overall", 0, "comment", "外観", 1),
+            FrameRef("frame-compare", 1, "comment", "外観", 2),
+        ],
+    )
+    proposal = expand_assignment(project, rule)
+    ready = [(item.slide_ordinal, item.item_number) for item in proposal.candidates if item.status == "ready"]
+    assert ready == [(0, 1), (0, 2), (1, 3), (1, 4), (2, 5), (2, 6)]
+    assert proposal.slides_to_add == 2
+    assert len(project.report_slides) == 0
+    accept_ordered_assignment(project, create_slides=True)
+    assert len(project.report_slides) == 3
+    kept = project_to_dict(project)
+    accept_ordered_assignment(project, create_slides=False)
+    assert project_to_dict(project)["slides"]
+    assert len(project.report_slides) == len(kept["slides"])
+
+
+def test_a_slide_range_starts_numbering_at_the_first_selected_slide(tmp_path: Path):
+    project = create_report(image_count=2)
+    _load_named_list(project, tmp_path / "a", "outer", "外観", 4)
+    _load_named_list(project, tmp_path / "b", "inner", "処理", 4)
+    rule = AssignmentRule(
+        step=1,
+        range_from=3,
+        range_to=4,
+        pattern=[
+            FrameRef("frame-overall", 0, "comment", "外観", 1, "外観検査 {comment} No.{n} 良品"),
+            FrameRef("frame-compare", 1, "comment", "処理", 1, "{txt} {file}"),
+        ],
+        title_template="{comment} {slide}",
+        text_templates=[TextTemplate("text-caption", "所見 {note2}")],
+    )
+    project.assets[0].note = "端部"
+    project.assets[0].file_name = "a1.bmp"
+    proposal = expand_assignment(project, rule)
+    assert {item.slide_ordinal for item in proposal.candidates} == {2, 3}
+    first = [item for item in proposal.candidates if item.slide_ordinal == 2 and item.status == "ready"]
+    assert [(item.frame_index, item.item_number) for item in first] == [(0, 1), (1, 1)]
+    assert first[0].caption == "外観検査 外観 No.1 良品"
+    title = next(item for item in proposal.labels if item.slide_ordinal == 2 and item.kind == "title")
+    assert title.text == "外観 3"
+    caption = next(item for item in proposal.labels if item.kind == "text" and item.slide_ordinal == 2)
+    assert caption.text == "所見 "
+    assert any("{note2}" in warning for warning in proposal.warnings)
+    assert accept_ordered_assignment(project, create_slides=False) == []
+    accept_ordered_assignment(project, create_slides=True)
+    assert len(project.report_slides) == 4
+    assert project.report_slides[0].slide.bindings == []
+    assert project.report_slides[2].slide.title == "外観 3"
+    shown = _show(project, 2)
+    texts = {item.element_id: item.text for item in shown.elements if item.text}
+    assert texts["frame-overall"] == "外観検査 外観 No.1 良品"
+    assert texts["text-caption"] == "所見 "
+    written = tmp_path / "out.pptx"
+    write_pptx(shown, written)
+    from pptx import Presentation
+
+    shapes = [shape.text_frame.text for shape in Presentation(str(written)).slides[0].shapes if shape.has_text_frame]
+    assert "外観検査 外観 No.1 良品" in shapes
+    project.report_slides[2].slide.title = "手で直した"
+    again = propose_ordered_assignment(project)
+    kept = next(item for item in again.labels if item.slide_ordinal == 2 and item.kind == "title")
+    assert kept.status == "protected"
+    accept_ordered_assignment(project)
+    assert project.report_slides[2].slide.title == "手で直した"
+    accept_ordered_assignment(project, overwrite_labels=True)
+    assert project.report_slides[2].slide.title == "外観 3"
+
+
+def test_plain_label_text_has_no_missing_variable_warning(tmp_path: Path):
+    project = create_report(image_count=2)
+    _load_named_list(project, tmp_path, "outer", "外観", 1)
+    expand_assignment(
+        project,
+        AssignmentRule(
+            pattern=[FrameRef("frame-overall", 0, "comment", "外観", 1, "良品")],
+        ),
+    )
+    proposal = propose_ordered_assignment(project)
+    assert proposal.labels[0].text == "良品"
+    assert not any("空です" in warning for warning in proposal.warnings)
+
+
+def _show(project, ordinal: int):
+    item = project.report_slides[ordinal]
+    layout = next(layout for layout in project.layouts if layout.id == item.layout_id)
+    project.slide = item.slide
+    project.content_master = layout.content_master
+    project.active_slide_id = item.id
+    return layout_slide(project)
 
 
 def _load_named_list(project, directory: Path, list_name: str, comment: str, count: int) -> None:

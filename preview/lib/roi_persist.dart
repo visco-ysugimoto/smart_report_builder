@@ -906,6 +906,7 @@ class OrderedCandidate {
     required this.status,
     required this.label,
     required this.reason,
+    this.caption = '',
   });
 
   final int slideOrdinal;
@@ -918,15 +919,41 @@ class OrderedCandidate {
   final String status;
   final String label;
   final String reason;
+  final String caption;
 
   String get key => '$slideOrdinal:$frameIndex';
 }
 
+class OrderedLabel {
+  const OrderedLabel({
+    required this.slideOrdinal,
+    required this.target,
+    required this.kind,
+    required this.text,
+    required this.status,
+    required this.reason,
+  });
+
+  final int slideOrdinal;
+  final String target;
+  final String kind;
+  final String text;
+  final String status;
+  final String reason;
+}
+
 class OrderedProposal {
-  const OrderedProposal({required this.warnings, required this.candidates});
+  const OrderedProposal({
+    required this.warnings,
+    required this.candidates,
+    this.labels = const [],
+    this.slidesToAdd = 0,
+  });
 
   final List<String> warnings;
   final List<OrderedCandidate> candidates;
+  final List<OrderedLabel> labels;
+  final int slidesToAdd;
 }
 
 OrderedProposal parseOrderedProposal(String stdout) {
@@ -961,10 +988,32 @@ OrderedProposal parseOrderedProposal(String stdout) {
         status: item['status']?.toString() ?? '',
         label: item['label']?.toString() ?? '',
         reason: item['reason']?.toString() ?? '',
+        caption: item['caption']?.toString() ?? '',
       ),
     );
   }
-  return OrderedProposal(warnings: warnings, candidates: candidates);
+  final labels = <OrderedLabel>[];
+  for (final item in decoded['labels'] as List? ?? const []) {
+    if (item is! Map) {
+      continue;
+    }
+    labels.add(
+      OrderedLabel(
+        slideOrdinal: (item['slideOrdinal'] as num?)?.toInt() ?? 0,
+        target: item['target']?.toString() ?? '',
+        kind: item['kind']?.toString() ?? '',
+        text: item['text']?.toString() ?? '',
+        status: item['status']?.toString() ?? '',
+        reason: item['reason']?.toString() ?? '',
+      ),
+    );
+  }
+  return OrderedProposal(
+    warnings: warnings,
+    candidates: candidates,
+    labels: labels,
+    slidesToAdd: (decoded['slidesToAdd'] as num?)?.toInt() ?? 0,
+  );
 }
 
 Future<OrderedProposal> expandAssignment({
@@ -1029,6 +1078,8 @@ Future<void> acceptOrderedAssignment({
   required String listName,
   int? ordinal,
   int? frame,
+  bool createSlides = true,
+  bool overwriteLabels = false,
 }) async {
   final arguments = <String>[
     '-m',
@@ -1045,6 +1096,10 @@ Future<void> acceptOrderedAssignment({
     layoutPath,
     '--pptx',
     pptxPath,
+    '--create-slides',
+    createSlides ? 'yes' : 'no',
+    '--overwrite-labels',
+    overwriteLabels ? 'yes' : 'no',
   ];
   if (ordinal != null && frame != null) {
     arguments.addAll(['--ordinal', '$ordinal', '--frame', '$frame']);

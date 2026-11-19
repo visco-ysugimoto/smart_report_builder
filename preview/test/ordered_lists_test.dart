@@ -30,6 +30,20 @@ void main() {
     expect(resolvePick(assets, 'comment', '外観', 4).status, 'missing');
   });
 
+  test('mixes free text with variables and blanks a missing note', () {
+    final rendered = renderLabel(
+      '外観検査 {comment} No.{n} 良品 {note}',
+      comment: '外観',
+      index: '1',
+      slide: '3',
+    );
+
+    expect(rendered.text, '外観検査 外観 No.1 良品 ');
+    expect(rendered.missing, ['note']);
+    expect(renderLabel('良品').text, '良品');
+    expect(renderLabel('良品').missing, isEmpty);
+  });
+
   test('a repeated comment is a conflict', () {
     const assets = [
       OrderedAsset(

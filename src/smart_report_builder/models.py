@@ -165,6 +165,15 @@ class FrameRef:
     list_by: str
     list_key: str
     item_number: int
+    label_template: str = ""
+
+
+@dataclass
+class TextTemplate:
+    """文章枠へ入れる差し込み文字列。"""
+
+    element_id: str
+    template: str
 
 
 @dataclass
@@ -191,6 +200,11 @@ class AssignmentRule:
     step: int = 1
     pattern: list[FrameRef] = field(default_factory=list)
     overrides: list[SlideOverride] = field(default_factory=list)
+    # 1始まり。range_to が空なら、リストが尽きるまで広げる。
+    range_from: int = 1
+    range_to: int | None = None
+    title_template: str = ""
+    text_templates: list[TextTemplate] = field(default_factory=list)
 
 
 @dataclass
@@ -218,6 +232,8 @@ class Asset:
     list_name: str | None = None
     list_comment: str | None = None
     list_index: int | None = None
+    file_name: str | None = None
+    note: str = ""
 
 
 @dataclass
@@ -726,6 +742,9 @@ def _asset_to_dict(asset: Asset) -> dict[str, Any]:
     _put_optional(payload, "task", asset.task)
     _put_optional(payload, "listName", asset.list_name)
     _put_optional(payload, "listComment", asset.list_comment)
+    _put_optional(payload, "fileName", asset.file_name)
+    if asset.note:
+        payload["note"] = asset.note
     if asset.list_index is not None:
         payload["listIndex"] = asset.list_index
     return payload
@@ -748,6 +767,8 @@ def _asset_from_dict(data: dict[str, Any]) -> Asset:
         list_name=_optional_str(data, "list_name") if "list_name" in data else _optional_str(data, "listName"),
         list_comment=_optional_str(data, "listComment"),
         list_index=None if data.get("listIndex") is None else int(data["listIndex"]),
+        file_name=_optional_str(data, "fileName"),
+        note=str(data.get("note") or ""),
     )
 
 
@@ -1015,6 +1036,7 @@ def _frame_ref_to_dict(ref: FrameRef) -> dict[str, Any]:
         "listBy": ref.list_by,
         "listKey": ref.list_key,
         "itemNumber": ref.item_number,
+        "labelTemplate": ref.label_template,
     }
 
 
@@ -1025,6 +1047,7 @@ def _frame_ref_from_dict(data: dict[str, Any], index: int) -> FrameRef:
         list_by=str(data.get("listBy") or "comment"),
         list_key=str(data.get("listKey") or ""),
         item_number=int(_required(data, "itemNumber")),
+        label_template=str(data.get("labelTemplate") or ""),
     )
 
 
@@ -1039,6 +1062,12 @@ def _rule_to_dict(rule: AssignmentRule) -> dict[str, Any]:
             {"elementId": item.element_id, "itemNumber": item.item_number} for item in rule.mappings
         ],
         "pattern": [_frame_ref_to_dict(item) for item in rule.pattern],
+        "rangeFrom": rule.range_from,
+        "rangeTo": rule.range_to,
+        "titleTemplate": rule.title_template,
+        "textTemplates": [
+            {"elementId": item.element_id, "template": item.template} for item in rule.text_templates
+        ],
         "overrides": [
             {
                 "slideOrdinal": item.slide_ordinal,
@@ -1083,6 +1112,12 @@ def _rule_from_dict(data: Any) -> AssignmentRule | None:
                 ],
             )
         )
+    text_templates = [
+        TextTemplate(element_id=str(item.get("elementId") or ""), template=str(item.get("template") or ""))
+        for item in data.get("textTemplates") or []
+        if isinstance(item, dict) and str(item.get("template") or "")
+    ]
+    range_to = data.get("rangeTo")
     offset = int(data.get("offset", 1))
     stride = int(data.get("stride", 1))
     per_slide = int(data.get("perSlide", max(len(pattern), 1)))
@@ -1108,6 +1143,10 @@ def _rule_from_dict(data: Any) -> AssignmentRule | None:
         step=int(data.get("step", stride)),
         pattern=pattern,
         overrides=overrides,
+        range_from=int(data.get("rangeFrom", 1)),
+        range_to=None if range_to in (None, "") else int(range_to),
+        title_template=str(data.get("titleTemplate") or ""),
+        text_templates=text_templates,
     )
 
 

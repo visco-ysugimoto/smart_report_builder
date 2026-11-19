@@ -839,6 +839,23 @@ class _SlidePreviewState extends State<SlidePreview> {
           rect: element.contentRect!,
           child: _imageChild(element),
         ),
+      if (element.kind == 'image_frame' && (element.text ?? '').isNotEmpty)
+        _box(
+          key: Key('frame-label:${element.elementId}'),
+          rect: SlideRect(
+            x: element.frame.x,
+            y: element.frame.y + element.frame.height - 16,
+            width: element.frame.width,
+            height: 16,
+          ),
+          child: Text(
+            element.text ?? '',
+            key: Key('frame-label-text:${element.elementId}'),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: const TextStyle(fontSize: 11, color: Color(0xFF1A1A1A)),
+          ),
+        ),
       if (element.kind == 'text' || element.kind == 'roi_label')
         _box(
           key: Key(

@@ -138,6 +138,8 @@ def _fill_slide(slide, result: LayoutResult, *, prefix: str = "", font_name: str
     for element in result.elements:
         if element.kind == "image_frame" and element.asset_path and element.content_rect is not None:
             _add_picture(slide, element, prefix)
+            if element.text:
+                _add_frame_label(slide, element, prefix, font_name)
         elif element.kind == "text":
             _add_text(slide, element, prefix, font_name)
         elif element.kind == "table":
@@ -254,6 +256,20 @@ def _add_table(slide, element: PlacedElement, prefix: str, font_name: str | None
             for paragraph in cell.text_frame.paragraphs:
                 for run in paragraph.runs:
                     _apply_font(run, font_name or _FONT_NAME, _FONT_SIZE_PT)
+
+
+def _add_frame_label(slide, element: PlacedElement, prefix: str, font_name: str | None) -> None:
+    height = min(16.0, element.frame.height)
+    box = Rect(element.frame.x, element.frame.y + element.frame.height - height, element.frame.width, height)
+    if not _positive(box):
+        return
+    shape = slide.shapes.add_textbox(*_emu_box(box))
+    shape.name = _shape_name(prefix, f"{element.display_name}（ラベル）")
+    shape.text_frame.word_wrap = True
+    shape.text_frame.text = element.text or ""
+    for paragraph in shape.text_frame.paragraphs:
+        for run in paragraph.runs:
+            _apply_font(run, font_name or _FONT_NAME, 11)
 
 
 def _add_text(slide, element: PlacedElement, prefix: str, font_name: str | None) -> None:

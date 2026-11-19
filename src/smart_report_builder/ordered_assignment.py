@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -26,6 +27,8 @@ from smart_report_builder.models import (
     Project,
     SlideInstance,
     SlideOverride,
+    TextNode,
+    TextTemplate,
     project_from_dict,
     project_to_dict,
 )
@@ -49,16 +52,32 @@ class OrderedCandidate:
     status: str
     label: str
     reason: str
+    caption: str = ""
+
+
+@dataclass
+class LabelCandidate:
+    """採用前のラベル。target は title、文章枠、画像枠のいずれか。"""
+
+    slide_ordinal: int
+    target: str
+    kind: str
+    text: str
+    status: str
+    reason: str
 
 
 @dataclass
 class OrderedProposal:
     candidates: list[OrderedCandidate] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    labels: list[LabelCandidate] = field(default_factory=list)
+    slides_to_add: int = 0
 
     def to_dict(self) -> dict:
         return {
             "warnings": list(self.warnings),
+            "slidesToAdd": self.slides_to_add,
             "candidates": [
                 {
                     "slideOrdinal": item.slide_ordinal,
@@ -71,8 +90,20 @@ class OrderedProposal:
                     "status": item.status,
                     "label": item.label,
                     "reason": item.reason,
+                    "caption": item.caption,
                 }
                 for item in self.candidates
+            ],
+            "labels": [
+                {
+                    "slideOrdinal": item.slide_ordinal,
+                    "target": item.target,
+                    "kind": item.kind,
+                    "text": item.text,
+                    "status": item.status,
+                    "reason": item.reason,
+                }
+                for item in self.labels
             ],
         }
 
@@ -141,6 +172,14 @@ def register_ordered_assets(project: Project, records: list[dict]) -> tuple[int,
         asset.list_name = _blank(record.get("listName"))
         asset.list_comment = _blank(record.get("listComment"))
         asset.list_index = index
+        file_name = _blank(record.get("fileName"))
+        if file_name:
+            asset.file_name = file_name
+        elif not asset.file_name:
+            asset.file_name = Path(asset.path).name
+        note = _blank(record.get("note"))
+        if note:
+            asset.note = note
         ids.append(asset.id)
     return added, updated, ids
 
@@ -174,6 +213,8 @@ def accept_ordered_assignment(
     list_name: str | None = None,
     slide_ordinal: int | None = None,
     frame_index: int | None = None,
+    create_slides: bool = True,
+    overwrite_labels: bool = False,
 ) -> list[tuple[str, str]]:
     """候補を採用する。slide と frame を指定したときはその1件だけ。"""
     proposal = propose_ordered_assignment(project, group=group, task=task, list_name=list_name)
@@ -189,7 +230,17 @@ def accept_ordered_assignment(
         for item in proposal.candidates
     ):
         raise ValueError("採用できる候補がありません")
-    _materialize_slides(project, proposal)
+    existing_count = len(project.report_slides) or 1
+    if not create_slides:
+        chosen = [item for item in chosen if item.slide_ordinal < existing_count]
+        limited = OrderedProposal(
+            candidates=[item for item in proposal.candidates if item.slide_ordinal < existing_count],
+            warnings=list(proposal.warnings),
+            labels=list(proposal.labels),
+        )
+        _materialize_slides(project, limited)
+    else:
+        _materialize_slides(project, proposal)
     applied: list[tuple[str, str]] = []
     for item in chosen:
         slide, frames = _slide_frames(project, item.slide_ordinal)
@@ -206,7 +257,41 @@ def accept_ordered_assignment(
         if project.slide is slide:
             pass
         applied.append((frame.id, item.asset_id))
+    if slide_ordinal is None and frame_index is None:
+        _apply_labels(project, proposal, existing_count, create_slides, overwrite_labels, applied)
     return applied
+
+
+def _apply_labels(
+    project: Project,
+    proposal: OrderedProposal,
+    existing_count: int,
+    create_slides: bool,
+    overwrite_labels: bool,
+    applied: list[tuple[str, str]],
+) -> None:
+    for label in proposal.labels:
+        if not create_slides and label.slide_ordinal >= existing_count:
+            continue
+        if label.status == "protected" and not overwrite_labels:
+            continue
+        if label.status not in {"ready", "protected"}:
+            continue
+        slide, _frames = _slide_frames(project, label.slide_ordinal)
+        if label.kind == "title":
+            slide.title = label.text
+        else:
+            _set_binding_text(slide, label.target, label.text)
+        applied.append((f"label:{label.target}", label.text))
+
+
+def _rule_fields(rule: AssignmentRule) -> dict:
+    return {
+        "range_from": rule.range_from,
+        "range_to": rule.range_to,
+        "title_template": rule.title_template,
+        "text_templates": list(rule.text_templates),
+    }
 
 
 def normalize_rule(rule: AssignmentRule) -> AssignmentRule:
@@ -222,6 +307,7 @@ def normalize_rule(rule: AssignmentRule) -> AssignmentRule:
             step=step,
             pattern=list(rule.pattern),
             overrides=list(rule.overrides),
+            **_rule_fields(rule),
         )
     if rule.mode == "explicit" and rule.mappings:
         pattern = [
@@ -242,14 +328,17 @@ def normalize_rule(rule: AssignmentRule) -> AssignmentRule:
         step=max(rule.stride, 1),
         pattern=pattern,
         overrides=list(rule.overrides),
+        **_rule_fields(rule),
     )
 
 
 def _propose(project: Project, rule: AssignmentRule) -> OrderedProposal:
     existing = _existing_frames(project)
     proposal = OrderedProposal()
-    ordinal = 0
-    while ordinal < _MAX_SLIDES:
+    origin = max(rule.range_from, 1) - 1
+    end = None if rule.range_to is None else rule.range_to - 1
+    ordinal = origin
+    while ordinal < _MAX_SLIDES and (end is None or ordinal <= end):
         is_new = ordinal >= len(existing)
         override = next((item for item in rule.overrides if item.slide_ordinal == ordinal), None)
         if is_new:
@@ -259,11 +348,12 @@ def _propose(project: Project, rule: AssignmentRule) -> OrderedProposal:
         else:
             slide_id, concrete = existing[ordinal]
             frames = list(concrete)
-        refs = _refs_for(rule, ordinal, len(frames))
-        if is_new and refs and all(_reference_is_past(project, ref) for ref in refs):
+        refs = _refs_for(rule, ordinal, len(frames), origin)
+        if end is None and is_new and refs and all(_reference_is_past(project, ref) for ref in refs):
             break
         if not refs and is_new:
             break
+        before = len(proposal.candidates)
         for index, ref in enumerate(refs):
             frame = frames[index] if index < len(frames) else None
             element_id = frame.id if frame is not None else ref.element_id
@@ -300,11 +390,20 @@ def _propose(project: Project, rule: AssignmentRule) -> OrderedProposal:
                     resolved.reason,
                 )
             )
+        _plan_labels(project, rule, proposal, ordinal, slide_id, is_new, refs, proposal.candidates[before:])
         ordinal += 1
+        if end is not None:
+            if ordinal > end:
+                break
+            continue
         if is_new or ordinal >= len(existing):
-            upcoming = _refs_for(rule, ordinal, len(rule.pattern))
+            upcoming = _refs_for(rule, ordinal, len(rule.pattern), origin)
             if not upcoming or all(_reference_is_past(project, ref) for ref in upcoming):
                 break
+    covered = {item.slide_ordinal for item in proposal.candidates}
+    if covered and max(covered) + 1 > len(existing):
+        proposal.slides_to_add = max(covered) + 1 - len(existing)
+        proposal.warnings.append(f"足りないスライドが{proposal.slides_to_add}枚あります。採用するときに追加できます")
     return proposal
 
 
@@ -432,7 +531,7 @@ def _same_list(asset: Asset, image_list: ImageList) -> bool:
     )
 
 
-def _refs_for(rule: AssignmentRule, ordinal: int, frame_count: int) -> list[FrameRef]:
+def _refs_for(rule: AssignmentRule, ordinal: int, frame_count: int, origin: int) -> list[FrameRef]:
     override = next((item for item in rule.overrides if item.slide_ordinal == ordinal), None)
     if override is not None:
         return list(override.frames[:frame_count])
@@ -444,10 +543,212 @@ def _refs_for(rule: AssignmentRule, ordinal: int, frame_count: int) -> list[Fram
                 ref.frame_index,
                 ref.list_by,
                 ref.list_key,
-                ref.item_number + ordinal * rule.step,
+                ref.item_number + (ordinal - origin) * rule.step,
+                ref.label_template,
             )
         )
     return refs
+
+
+_LABEL_TOKEN = re.compile(r"\{([A-Za-z0-9_]+)\}")
+LABEL_VARIABLES = (
+    "comment",
+    "note",
+    "txt",
+    "file",
+    "index",
+    "n",
+    "slide",
+    "group",
+    "task",
+)
+
+
+@dataclass
+class RenderedLabel:
+    text: str
+    missing: list[str]
+
+
+def render_label(
+    template: str,
+    numbered: dict[int, Asset | None],
+    slide_number: int,
+    *,
+    focus: int | None = None,
+) -> RenderedLabel:
+    """自由な文と変数を混ぜる。値が無い変数は空にし、名前を missing に入れる。"""
+    if not template:
+        return RenderedLabel("", [])
+    values = {"slide": str(slide_number)}
+
+    def fill(asset: Asset | None, suffix: str) -> None:
+        file_name = ""
+        comment = ""
+        txt = ""
+        index = ""
+        note = ""
+        group = ""
+        task = ""
+        if asset is not None:
+            file_name = asset.file_name or Path(asset.path).name
+            comment = asset.list_comment or ""
+            txt = asset.list_name or ""
+            index = "" if asset.list_index is None else str(asset.list_index)
+            note = asset.note or ""
+            group = asset.group or ""
+            task = asset.task or ""
+        values[f"comment{suffix}"] = comment
+        values[f"note{suffix}"] = note
+        values[f"txt{suffix}"] = txt
+        values[f"file{suffix}"] = file_name
+        values[f"index{suffix}"] = index
+        values[f"n{suffix}"] = index
+        values[f"group{suffix}"] = group
+        values[f"task{suffix}"] = task
+
+    fill(numbered.get(0 if focus is None else focus), "")
+    for index, asset in numbered.items():
+        fill(asset, str(index + 1))
+    missing: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if not values.get(key):
+            missing.append(key)
+            return ""
+        return values[key]
+
+    return RenderedLabel(_LABEL_TOKEN.sub(replace, template), missing)
+
+
+def _plan_labels(
+    project: Project,
+    rule: AssignmentRule,
+    proposal: OrderedProposal,
+    ordinal: int,
+    slide_id: str,
+    is_new: bool,
+    refs: list[FrameRef],
+    made: list[OrderedCandidate],
+) -> None:
+    if not rule.title_template and not rule.text_templates and not any(ref.label_template for ref in refs):
+        return
+    numbered: dict[int, Asset | None] = {}
+    for item in made:
+        numbered[item.frame_index] = _asset_by_id(project, item.asset_id)
+    slide_number = ordinal + 1
+    slide = None if is_new else _slide_by_ordinal(project, ordinal)
+    page_title = project.design_master.page_title.strip()
+
+    def remember(kind: str, target: str, rendered: RenderedLabel, manual: bool, master_warning: str) -> None:
+        proposal.labels.append(
+            LabelCandidate(
+                ordinal,
+                target,
+                kind,
+                rendered.text,
+                "protected" if manual else "ready",
+                master_warning if manual else rendered.text,
+            )
+        )
+        if manual:
+            proposal.warnings.append(f"スライド{slide_number} の{master_warning}")
+        if rendered.missing:
+            names = "、".join(f"{{{name}}}" for name in rendered.missing)
+            proposal.warnings.append(f"スライド{slide_number} の {names} は空です")
+
+    if rule.title_template:
+        rendered = render_label(rule.title_template, numbered, slide_number)
+        current = "" if slide is None else slide.title.strip()
+        manual = bool(current) and current != rendered.text and current != page_title
+        remember("title", "title", rendered, manual, "手入力のタイトルは残します")
+    nodes = _text_nodes(project, ordinal, is_new)
+    for template in rule.text_templates:
+        node = _text_node(nodes, template.element_id)
+        if node is None:
+            proposal.warnings.append("ラベルを書く文章枠がありません")
+            continue
+        rendered = render_label(template.template, numbered, slide_number)
+        current = None if slide is None else _binding_text(slide, node.id)
+        manual = _text_is_manual(current, node.text, rendered.text)
+        remember("text", node.id, rendered, manual, "手入力のラベルは残します")
+    for ref, item in zip(refs, made, strict=False):
+        if not ref.label_template:
+            continue
+        rendered = render_label(ref.label_template, numbered, slide_number, focus=item.frame_index)
+        current = None if slide is None else _binding_text(slide, item.element_id)
+        manual = _text_is_manual(current, None, rendered.text)
+        remember("frame", item.element_id, rendered, manual, "手入力のラベルは残します")
+        item.caption = rendered.text
+
+
+def _text_is_manual(current: str | None, master: str | None, generated: str) -> bool:
+    if current is None:
+        return False
+    if current == generated:
+        return False
+    if master is not None and current == master:
+        return False
+    return True
+
+
+def _binding_text(slide: SlideInstance, element_id: str) -> str | None:
+    matches = [item for item in slide.bindings if item.element_id == element_id]
+    if len(matches) != 1:
+        return None
+    return matches[0].text
+
+
+def _set_binding_text(slide: SlideInstance, element_id: str, text: str) -> None:
+    matches = [item for item in slide.bindings if item.element_id == element_id]
+    if len(matches) > 1:
+        return
+    if len(matches) == 1:
+        matches[0].text = text
+        return
+    slide.bindings.append(Binding(element_id=element_id, text=text))
+
+
+def _asset_by_id(project: Project, asset_id: str | None) -> Asset | None:
+    if not asset_id:
+        return None
+    return next((item for item in project.assets if item.id == asset_id), None)
+
+
+def _slide_by_ordinal(project: Project, ordinal: int) -> SlideInstance | None:
+    if project.report_slides:
+        if ordinal >= len(project.report_slides):
+            return None
+        return project.report_slides[ordinal].slide
+    if ordinal == 0:
+        return project.slide
+    return None
+
+
+def _text_nodes(project: Project, ordinal: int, is_new: bool) -> list[TextNode]:
+    master = project.content_master
+    if not is_new and project.report_slides and ordinal < len(project.report_slides):
+        layout_id = project.report_slides[ordinal].layout_id
+        layout = next((item for item in project.layouts if item.id == layout_id), None)
+        if layout is not None:
+            master = layout.content_master
+    return [node for node in _walk_nodes(master.root) if isinstance(node, TextNode)]
+
+
+def _text_node(nodes: list[TextNode], element_id: str) -> TextNode | None:
+    if element_id:
+        return next((node for node in nodes if node.id == element_id), None)
+    captions = [node for node in nodes if node.role_id == "caption"]
+    if captions:
+        return captions[0]
+    return nodes[0] if nodes else None
+
+
+def _walk_nodes(node):
+    yield node
+    for child in getattr(node, "children", []) or []:
+        yield from _walk_nodes(child)
 
 
 def _materialize_slides(project: Project, proposal: OrderedProposal) -> None:
@@ -456,8 +757,7 @@ def _materialize_slides(project: Project, proposal: OrderedProposal) -> None:
 
     needed = 0
     for item in proposal.candidates:
-        if item.status == "ready":
-            needed = max(needed, item.slide_ordinal + 1)
+        needed = max(needed, item.slide_ordinal + 1)
     if needed <= 1 and not project.report_slides:
         _ensure_slide_frames(project, 0, _frames_needed(proposal, 0), add_image_frame)
         return
@@ -639,6 +939,10 @@ def _frames(node) -> list[ImageFrameNode]:
 def _validate_rule(rule: AssignmentRule) -> None:
     if rule.step < 1:
         raise ValueError("次のスライドへ進む数は1以上です")
+    if rule.range_from < 1:
+        raise ValueError("開始スライドは1以上です")
+    if rule.range_to is not None and rule.range_to < rule.range_from:
+        raise ValueError("終了スライドは開始スライド以降です")
     if not rule.pattern:
         raise ValueError("枠の参照がありません")
     if len(rule.pattern) > 8:
@@ -691,9 +995,11 @@ def rule_from_payload(payload: dict) -> AssignmentRule:
                 list_by=str(item.get("listBy") or "comment"),
                 list_key=str(item.get("listKey") or ""),
                 item_number=int(item["itemNumber"]),
+                label_template=str(item.get("labelTemplate") or ""),
             )
             for index, item in enumerate(payload["pattern"])
         ]
+        range_to = payload.get("rangeTo")
         overrides = [
             SlideOverride(
                 slide_ordinal=int(item.get("slideOrdinal", 0)),
@@ -717,6 +1023,17 @@ def rule_from_payload(payload: dict) -> AssignmentRule:
                 per_slide=len(pattern),
                 pattern=pattern,
                 overrides=overrides,
+                range_from=int(payload.get("rangeFrom", 1)),
+                range_to=None if range_to in (None, "") else int(range_to),
+                title_template=str(payload.get("titleTemplate") or ""),
+                text_templates=[
+                    TextTemplate(
+                        element_id=str(item.get("elementId") or ""),
+                        template=str(item.get("template") or ""),
+                    )
+                    for item in payload.get("textTemplates") or []
+                    if isinstance(item, dict) and str(item.get("template") or "")
+                ],
             )
         )
     mappings = [
