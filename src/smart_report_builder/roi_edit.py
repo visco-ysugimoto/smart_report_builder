@@ -868,6 +868,20 @@ def main(argv: list[str] | None = None) -> int:
         from smart_report_builder.edit_session import serve
 
         return serve()
+    # 新 UI (preview/lib/state/report_service.dart) が叩くのはここから下の
+    # `cli/` パッケージに登録されたサブコマンドのみ:
+    #   register-source / pick-layout / pick-roles / set-templates /
+    #   expand-slides / edit-slide / save-pptx
+    # 旧 UI で使っていた create / delete / link / unlink / register-ordered /
+    # propose-ordered / accept-ordered / suggest / apply-suggestion /
+    # accept-ready / variants / apply-variant / master-roi / add-table 系 /
+    # add-frame / set-frame-kind などは互換維持のため残しているが、
+    # 新 UI からは呼ばれない。将来的に削除予定。
+    from smart_report_builder.cli import dispatch as _cli_dispatch
+
+    cli_code = _cli_dispatch(args)
+    if cli_code is not None:
+        return cli_code
     if args and args[0] == "new-project":
         return _new_project(args[1:])
     if args and args[0] == "open-pptx":
@@ -980,6 +994,7 @@ def _new_project(argv: list[str]) -> int:
     parser.add_argument("--arrangement", default="horizontal")
     parser.add_argument("--template", default="images")
     parser.add_argument("--paper", default="16x9")
+    parser.add_argument("--replace", action="store_true", help="Replace project files already in the folder")
     args = parser.parse_args(argv)
     try:
         project = create_report(
@@ -988,7 +1003,11 @@ def _new_project(argv: list[str]) -> int:
             template=args.template,
             paper=args.paper,
         )
-        project_path, layout_path, result = _write_new_project(Path(args.directory), project)
+        project_path, layout_path, result = _write_new_project(
+            Path(args.directory),
+            project,
+            replace=args.replace,
+        )
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1054,13 +1073,16 @@ def _open_pptx_command(argv: list[str]) -> int:
     return 0
 
 
-def _write_new_project(directory: Path, project: Project):
+def _write_new_project(directory: Path, project: Project, *, replace: bool = False):
     directory.mkdir(parents=True, exist_ok=True)
     project_path = directory / "project.json"
     layout_path = directory / "layout.json"
     pptx_path = directory / "report.pptx"
-    if any(path.exists() for path in (project_path, layout_path, pptx_path)):
+    if any(path.exists() for path in (project_path, layout_path, pptx_path)) and not replace:
         raise ValueError("すでにファイルがあるため、新しいプロジェクトは作りません")
+    if replace:
+        for path in (project_path, layout_path, pptx_path, directory / "chrome.png", directory / "template.pptx"):
+            path.unlink(missing_ok=True)
     materialize_template(project, directory)
     result = layout_slide(project)
     save_project(project, project_path)

@@ -622,9 +622,9 @@ def test_set_image_frame_kind_switches_between_picture_and_zoom(tmp_path: Path):
     project = build_roi_project(image)
     assert set_image_frame_kind(project, ZOOM_FRAME_ID, "comparison") == ZOOM_FRAME_ID
     changed = _frame(project, ZOOM_FRAME_ID)
-    assert changed.role_id == "comparison"
+    assert changed.role_id == "image"
     assert changed.fit_mode.value == "contain"
-    assert changed.display_name == "比較画像"
+    assert changed.display_name == "画像"
     assert [(roi.x, roi.y, roi.width, roi.height) for roi in project.slide.rois] == rectangles[:1]
     assert project.slide.rois[0].zoom_element_id is None
     shown = next(item for item in layout_slide(project).elements if item.element_id == ZOOM_FRAME_ID)

@@ -3,8 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:smart_report_preview/layout_result.dart';
-import 'package:smart_report_preview/roi_links.dart';
-
 /// 配置 JSON がディスクに書かれたとき。PPTX の書き出し完了は待たない。
 void Function(String layoutPath)? reportLayoutReady;
 
@@ -428,8 +426,22 @@ Future<void> redoLastRoiEdit({
   }
 }
 
+/// ファイル選択は同時に 1 つだけ開く。連打でダイアログが積み重ならないようにする。
+bool _fileDialogBusy = false;
+
+Future<T> _oneFileDialog<T>(Future<T> Function() open, T ifBusy) async {
+  if (_fileDialogBusy) return ifBusy;
+  _fileDialogBusy = true;
+  try {
+    return await open();
+  } finally {
+    _fileDialogBusy = false;
+  }
+}
+
 /// 画像ファイルを選ぶ。キャンセルしたときは null。元ファイルは開かない。
-Future<String?> pickImageFile() async {
+Future<String?> pickImageFile() {
+  return _oneFileDialog(() async {
   const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
@@ -455,10 +467,12 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     return null;
   }
   return path;
+  }, null);
 }
 
 /// 画像ファイルを複数選ぶ。キャンセルしたときは空。
-Future<List<String>> pickImageFiles() async {
+Future<List<String>> pickImageFiles() {
+  return _oneFileDialog(() async {
   const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
@@ -477,10 +491,12 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     for (final line in output.split(RegExp(r'\r?\n')))
       if (line.trim().isNotEmpty) line.trim(),
   ];
+  }, const []);
 }
 
 /// プレビューする PPTX か配置 JSON を選ぶ。キャンセルしたときは null。
-Future<String?> pickPreviewFile({String? initialDirectory}) async {
+Future<String?> pickPreviewFile({String? initialDirectory}) {
+  return _oneFileDialog(() async {
   final start = (initialDirectory ?? '').replaceAll("'", "''");
   final script = r'''
 Add-Type -AssemblyName System.Windows.Forms
@@ -509,10 +525,12 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     return null;
   }
   return output;
+  }, null);
 }
 
 /// タスクファイルを選ぶ。キャンセルしたときは null。
-Future<String?> pickTaskFile() async {
+Future<String?> pickTaskFile() {
+  return _oneFileDialog(() async {
   const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.OpenFileDialog
@@ -528,6 +546,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     return null;
   }
   return output;
+  }, null);
 }
 
 Future<String> _dialogOutput(String script, String fallback) async {
@@ -565,7 +584,8 @@ FolderRegistration parseFolderRegistration(String output) {
 }
 
 /// フォルダを選ぶ。キャンセルしたときは null。
-Future<String?> pickFolder() async {
+Future<String?> pickFolder() {
+  return _oneFileDialog(() async {
   const script = r'''
 Add-Type -AssemblyName System.Windows.Forms
 $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -589,6 +609,7 @@ if ($result -eq [System.Windows.Forms.DialogResult]::OK) {
     return null;
   }
   return path;
+  }, null);
 }
 
 class ReportLayoutOption {
@@ -1190,81 +1211,6 @@ Future<void> createReportProject({
   if (result.exitCode != 0) {
     final message = '${result.stderr}'.trim();
     throw FormatException(message.isEmpty ? 'プロジェクトを作成できません' : message);
-  }
-}
-
-Future<List<AssignmentCandidate>> listAssignmentCandidates({
-  required String pythonExecutable,
-  required String projectPath,
-  String? synonymsPath,
-}) async {
-  final arguments = <String>[
-    '-m',
-    'smart_report_builder.roi_edit',
-    'suggest',
-    projectPath,
-  ];
-  if (synonymsPath != null && synonymsPath.isNotEmpty) {
-    arguments.addAll(['--synonyms', synonymsPath]);
-  }
-  final result = await runReportCommand(pythonExecutable, arguments);
-  if (result.exitCode != 0) {
-    final message = '${result.stderr}'.trim();
-    throw FormatException(message.isEmpty ? '割当候補を読めません' : message);
-  }
-  return parseSuggestedAssignments('${result.stdout}');
-}
-
-Future<void> acceptReadyAssignments({
-  required String pythonExecutable,
-  required String projectPath,
-  required String layoutPath,
-  required String pptxPath,
-  String? synonymsPath,
-}) async {
-  final arguments = <String>[
-    '-m',
-    'smart_report_builder.roi_edit',
-    'accept-ready',
-    projectPath,
-    '--layout',
-    layoutPath,
-    '--pptx',
-    pptxPath,
-  ];
-  if (synonymsPath != null && synonymsPath.isNotEmpty) {
-    arguments.addAll(['--synonyms', synonymsPath]);
-  }
-  final result = await runReportCommand(pythonExecutable, arguments);
-  if (result.exitCode != 0) {
-    final message = '${result.stderr}'.trim();
-    throw FormatException(message.isEmpty ? '確定候補を割り当てできません' : message);
-  }
-}
-
-Future<void> applyAssignmentCandidate({
-  required String pythonExecutable,
-  required String projectPath,
-  required String layoutPath,
-  required String pptxPath,
-  required String elementId,
-  required String assetId,
-}) async {
-  final result = await runReportCommand(pythonExecutable, [
-    '-m',
-    'smart_report_builder.roi_edit',
-    'apply-suggestion',
-    projectPath,
-    elementId,
-    assetId,
-    '--layout',
-    layoutPath,
-    '--pptx',
-    pptxPath,
-  ]);
-  if (result.exitCode != 0) {
-    final message = '${result.stderr}'.trim();
-    throw FormatException(message.isEmpty ? '候補を割り当てできません' : message);
   }
 }
 

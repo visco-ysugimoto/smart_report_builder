@@ -161,6 +161,10 @@ class PlacedElement {
     this.lineEnd,
     this.tableRows,
     this.groupFrame,
+    this.zoomElementId,
+    this.textAnchor,
+    this.labelFrame,
+    this.fontPt,
   });
 
   final String elementId;
@@ -178,6 +182,10 @@ class PlacedElement {
   final LayoutPoint? lineEnd;
   final List<List<String>>? tableRows;
   final SlideRect? groupFrame;
+  final String? zoomElementId;
+  final String? textAnchor;
+  final SlideRect? labelFrame;
+  final double? fontPt;
 
   PlacedElement copyWith({
     SlideRect? frame,
@@ -201,6 +209,10 @@ class PlacedElement {
       lineEnd: lineEnd ?? this.lineEnd,
       tableRows: tableRows,
       groupFrame: groupFrame,
+      zoomElementId: zoomElementId,
+      textAnchor: textAnchor,
+      labelFrame: labelFrame,
+      fontPt: fontPt,
     );
   }
 
@@ -229,6 +241,12 @@ class PlacedElement {
       groupFrame: json['groupFrame'] == null
           ? null
           : SlideRect.fromJson(Map<String, dynamic>.from(json['groupFrame'] as Map)),
+      zoomElementId: json['zoomElementId'] as String?,
+      textAnchor: json['textAnchor'] as String?,
+      labelFrame: json['labelFrame'] == null
+          ? null
+          : SlideRect.fromJson(Map<String, dynamic>.from(json['labelFrame'] as Map)),
+      fontPt: (json['fontPt'] as num?)?.toDouble(),
     );
   }
 }

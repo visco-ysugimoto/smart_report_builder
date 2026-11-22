@@ -12,7 +12,7 @@ from pathlib import Path
 from lxml import etree
 from pptx import Presentation
 from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
-from pptx.enum.text import MSO_AUTO_SIZE
+from pptx.enum.text import MSO_AUTO_SIZE, PP_ALIGN
 from pptx.dml.color import RGBColor
 from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
@@ -31,8 +31,7 @@ from smart_report_builder.imaging_template import (
 from smart_report_builder.models import LayoutResult, PlacedElement, Rect
 from smart_report_builder.units import pt_to_emu
 
-_FRAME_COLOR = RGBColor(0x2B, 0x6C, 0xB0)
-_ROI_COLOR = RGBColor(0xC0, 0x56, 0x21)
+_ROI_COLOR = RGBColor(0xFF, 0x00, 0x00)
 _FONT_NAME = "Yu Gothic"
 _FONT_SIZE_PT = 16
 
@@ -133,9 +132,6 @@ def _title_shape(slide, shape_name: str | None):
 
 def _fill_slide(slide, result: LayoutResult, *, prefix: str = "", font_name: str | None = None) -> None:
     for element in result.elements:
-        if element.kind == "image_frame":
-            _add_frame(slide, element, prefix)
-    for element in result.elements:
         if element.kind == "image_frame" and element.asset_path and element.content_rect is not None:
             _add_picture(slide, element, prefix)
             if element.text:
@@ -175,16 +171,6 @@ def _blank_layout(presentation: Presentation):
     return candidates[0]
 
 
-def _add_frame(slide, element: PlacedElement, prefix: str) -> None:
-    if not _positive(element.frame):
-        return
-    shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, *_emu_box(element.frame))
-    shape.name = _shape_name(prefix, element.display_name)
-    shape.fill.background()
-    shape.line.color.rgb = _FRAME_COLOR
-    shape.line.width = Pt(1.5)
-
-
 def _add_picture(slide, element: PlacedElement, prefix: str) -> None:
     content = element.content_rect
     if content is None or element.asset_path is None or not _positive(content):
@@ -206,6 +192,7 @@ def _add_roi(slide, element: PlacedElement, prefix: str) -> None:
     shape.fill.background()
     shape.line.color.rgb = _ROI_COLOR
     shape.line.width = Pt(1.5)
+    _without_theme_effects(shape)
 
 
 def _add_connector(slide, element: PlacedElement, prefix: str) -> None:
@@ -223,7 +210,19 @@ def _add_connector(slide, element: PlacedElement, prefix: str) -> None:
     shape.name = _shape_name(prefix, element.display_name)
     shape.line.color.rgb = _ROI_COLOR
     shape.line.width = Pt(1.5)
+    _without_theme_effects(shape)
     _arrow_toward_roi(shape)
+
+
+def _without_theme_effects(shape) -> None:
+    """テーマの効果参照を外し、影のない線だけの図形にする。"""
+    element = shape._element
+    style = element.find(qn("p:style"))
+    if style is not None:
+        element.remove(style)
+    sp_pr = element.spPr
+    if sp_pr.find(qn("a:effectLst")) is None:
+        etree.SubElement(sp_pr, qn("a:effectLst"))
 
 
 def _arrow_toward_roi(shape) -> None:
@@ -259,17 +258,19 @@ def _add_table(slide, element: PlacedElement, prefix: str, font_name: str | None
 
 
 def _add_frame_label(slide, element: PlacedElement, prefix: str, font_name: str | None) -> None:
-    height = min(16.0, element.frame.height)
-    box = Rect(element.frame.x, element.frame.y + element.frame.height - height, element.frame.width, height)
-    if not _positive(box):
+    box = element.label_frame
+    if box is None or not _positive(box):
         return
     shape = slide.shapes.add_textbox(*_emu_box(box))
     shape.name = _shape_name(prefix, f"{element.display_name}（ラベル）")
     shape.text_frame.word_wrap = True
     shape.text_frame.text = element.text or ""
+    size = element.font_pt or 14.0
     for paragraph in shape.text_frame.paragraphs:
+        if element.text_anchor == "below":
+            paragraph.alignment = PP_ALIGN.CENTER
         for run in paragraph.runs:
-            _apply_font(run, font_name or _FONT_NAME, 11)
+            _apply_font(run, font_name or _FONT_NAME, size)
 
 
 def _add_text(slide, element: PlacedElement, prefix: str, font_name: str | None) -> None:
@@ -286,9 +287,10 @@ def _add_text(slide, element: PlacedElement, prefix: str, font_name: str | None)
     text_frame.margin_top = Emu(0)
     text_frame.margin_bottom = Emu(0)
     text_frame.text = element.text or ""
+    size = element.font_pt or _FONT_SIZE_PT
     for paragraph in text_frame.paragraphs:
         for run in paragraph.runs:
-            _apply_font(run, font_name or _FONT_NAME, _FONT_SIZE_PT)
+            _apply_font(run, font_name or _FONT_NAME, size)
 
 
 def _shape_name(prefix: str, name: str) -> str:

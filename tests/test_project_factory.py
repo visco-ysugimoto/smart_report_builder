@@ -154,6 +154,9 @@ def test_new_project_command_saves_and_refuses_to_overwrite(tmp_path: Path):
     before = (directory / "project.json").read_bytes()
     assert main(["new-project", str(directory)]) == 1
     assert (directory / "project.json").read_bytes() == before
+    assert main(["new-project", str(directory), "--images", "2", "--replace"]) == 0
+    replaced = load_project(directory / "project.json")
+    assert replaced.content_master.name == "画像2枚と説明"
 
 
 def test_added_layouts_stay_in_one_project_and_one_pptx(tmp_path: Path):

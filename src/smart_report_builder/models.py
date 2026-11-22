@@ -92,6 +92,12 @@ class TextNode:
     display_name: str
     text: str
     height_pt: float = TEXT_HEIGHT_PT
+    # 親領域に対する正規化位置。指定すると段組みに参加せず、その位置へ置く。
+    free_rect: Rect | None = None
+    # before は画像ブロックより上、after は下。説明文の位置に使う。
+    place: Literal["before", "after"] = "after"
+    shown: bool = True
+    font_pt: float = 16.0
     kind: Literal["text"] = "text"
 
 
@@ -241,6 +247,10 @@ class Binding:
     element_id: str
     asset_id: str | None = None
     text: str | None = None
+    # 画像見出しの位置。above は画像の上、below は画像の下中央。
+    text_anchor: str | None = None
+    # 見出しの文字サイズ（pt）。未指定は 14。
+    font_pt: float | None = None
 
 
 @dataclass
@@ -373,6 +383,10 @@ class PlacedElement:
     line_end: Point | None = None
     table_rows: list[list[str]] | None = None
     group_frame: Rect | None = None
+    zoom_element_id: str | None = None
+    text_anchor: str | None = None
+    label_frame: Rect | None = None
+    font_pt: float | None = None
 
 
 @dataclass(frozen=True)
@@ -508,6 +522,14 @@ def _placed_to_dict(element: PlacedElement) -> dict[str, Any]:
         payload["tableRows"] = element.table_rows
     if element.group_frame is not None:
         payload["groupFrame"] = element.group_frame.to_dict()
+    if element.zoom_element_id is not None:
+        payload["zoomElementId"] = element.zoom_element_id
+    if element.text_anchor:
+        payload["textAnchor"] = element.text_anchor
+    if element.label_frame is not None:
+        payload["labelFrame"] = element.label_frame.to_dict()
+    if element.font_pt is not None:
+        payload["fontPt"] = element.font_pt
     return payload
 
 
@@ -535,6 +557,10 @@ def _placed_from_dict(data: dict[str, Any]) -> PlacedElement:
         line_end=_optional_point(data, "lineEnd"),
         table_rows=_table_rows(data.get("tableRows")),
         group_frame=None if data.get("groupFrame") is None else Rect.from_dict(data["groupFrame"]),
+        zoom_element_id=None if data.get("zoomElementId") is None else str(data["zoomElementId"]),
+        text_anchor=None if data.get("textAnchor") not in {"above", "below"} else str(data["textAnchor"]),
+        label_frame=None if data.get("labelFrame") is None else Rect.from_dict(data["labelFrame"]),
+        font_pt=None if data.get("fontPt") is None else float(data["fontPt"]),
     )
 
 
@@ -772,16 +798,25 @@ def _asset_from_dict(data: dict[str, Any]) -> Asset:
     )
 
 
+def _binding_to_dict(binding: Binding) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "elementId": binding.element_id,
+        "assetId": binding.asset_id,
+        "text": binding.text,
+    }
+    if binding.text_anchor in {"above", "below"}:
+        payload["headingPlace"] = binding.text_anchor
+    if binding.font_pt is not None:
+        payload["headingSize"] = binding.font_pt
+    return payload
+
+
 def _slide_to_dict(slide: SlideInstance) -> dict[str, Any]:
     payload = {
         "id": slide.id,
         "contentMasterId": slide.content_master_id,
         "bindings": [
-            {
-                "elementId": binding.element_id,
-                "assetId": binding.asset_id,
-                "text": binding.text,
-            }
+            _binding_to_dict(binding)
             for binding in slide.bindings
         ],
         "rois": [_roi_to_dict(roi) for roi in slide.rois],
@@ -799,6 +834,10 @@ def _slide_from_dict(data: dict[str, Any]) -> SlideInstance:
                 element_id=str(_required(item, "elementId")),
                 asset_id=None if item.get("assetId") is None else str(item["assetId"]),
                 text=None if item.get("text") is None else str(item["text"]),
+                text_anchor=None
+                if item.get("headingPlace") not in {"above", "below"}
+                else str(item["headingPlace"]),
+                font_pt=None if item.get("headingSize") is None else float(item["headingSize"]),
             )
         )
     rois: list[Roi] = []
@@ -945,7 +984,7 @@ def _element_to_dict(element: Element) -> dict[str, Any]:
             payload["freeRect"] = element.free_rect.to_dict()
         return payload
     if isinstance(element, TextNode):
-        return {
+        payload = {
             "id": element.id,
             "kind": element.kind,
             "roleId": element.role_id,
@@ -953,6 +992,15 @@ def _element_to_dict(element: Element) -> dict[str, Any]:
             "text": element.text,
             "heightPt": element.height_pt,
         }
+        if element.free_rect is not None:
+            payload["freeRect"] = element.free_rect.to_dict()
+        if element.place == "before":
+            payload["place"] = "before"
+        if not element.shown:
+            payload["shown"] = False
+        if element.font_pt != 16:
+            payload["fontPt"] = element.font_pt
+        return payload
     if isinstance(element, TableNode):
         return {
             "id": element.id,
@@ -993,12 +1041,17 @@ def _element_from_dict(data: dict[str, Any]) -> Element:
             free_rect=None if free is None else Rect.from_dict(free),
         )
     if kind == "text":
+        free = data.get("freeRect")
         return TextNode(
             id=str(_required(data, "id")),
             role_id=str(_required(data, "roleId")),
             display_name=str(_required(data, "displayName")),
             text=str(_required(data, "text")),
             height_pt=float(_required(data, "heightPt")),
+            free_rect=None if free is None else Rect.from_dict(free),
+            place="before" if data.get("place") == "before" else "after",
+            shown=data.get("shown", True) is not False,
+            font_pt=16.0 if data.get("fontPt") is None else float(data["fontPt"]),
         )
     if kind == "table":
         return TableNode(

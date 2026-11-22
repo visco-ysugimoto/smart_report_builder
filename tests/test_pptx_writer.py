@@ -4,6 +4,7 @@ import pytest
 from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
+from pptx.oxml.ns import qn
 
 from smart_report_builder.demo import DEFAULT_CAPTION, build_roi_project, build_two_image_project
 from smart_report_builder.layout import layout_slide
@@ -27,20 +28,18 @@ def test_assigned_slide_exports_separate_editable_objects(tmp_path):
     assert presentation.slide_height == pt_to_emu(result.slide_height_pt)
     slide = presentation.slides[0]
     shapes = list(slide.shapes)
-    assert len(shapes) == 5
+    assert len(shapes) == 3
     assert _count(shapes, MSO_SHAPE_TYPE.PICTURE) == 2
-    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 2
+    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 0
     assert _count(shapes, MSO_SHAPE_TYPE.TEXT_BOX) == 1
 
     by_name = {shape.name: shape for shape in shapes}
-    _assert_emu(by_name["全体画像"], result.elements[0].frame)
-    _assert_emu(by_name["比較画像"], result.elements[1].frame)
     _assert_emu(by_name["全体画像（画像）"], result.elements[0].content_rect)
     _assert_emu(by_name["比較画像（画像）"], result.elements[1].content_rect)
     _assert_emu(by_name["説明"], result.elements[2].frame)
     assert by_name["全体画像（画像）"].top == pt_to_emu(106.5)
-    assert by_name["全体画像（画像）"].height != by_name["全体画像"].height
-    assert by_name["比較画像（画像）"].width != by_name["比較画像"].width
+    assert by_name["全体画像（画像）"].height != pt_to_emu(result.elements[0].frame.height)
+    assert by_name["比較画像（画像）"].width != pt_to_emu(result.elements[1].frame.width)
     assert by_name["説明"].text_frame.text == DEFAULT_CAPTION
     caption_frame = by_name["説明"].text_frame
     assert caption_frame.margin_left == 0
@@ -75,9 +74,9 @@ def test_unassigned_master_exports_frames_and_text_without_pictures(tmp_path):
     slide = Presentation(destination).slides[0]
     shapes = list(slide.shapes)
     assert _count(shapes, MSO_SHAPE_TYPE.PICTURE) == 0
-    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 2
+    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 0
     assert _count(shapes, MSO_SHAPE_TYPE.TEXT_BOX) == 1
-    assert len(shapes) == 3
+    assert len(shapes) == 1
     text_box = next(shape for shape in shapes if shape.shape_type == MSO_SHAPE_TYPE.TEXT_BOX)
     assert text_box.text_frame.text == DEFAULT_CAPTION
     assert "<p:pic" not in slide._element.xml
@@ -116,7 +115,7 @@ def test_roi_exports_an_independent_shape_and_crops_only_the_zoom(tmp_path):
 
     shapes = list(Presentation(destination).slides[0].shapes)
     assert _count(shapes, MSO_SHAPE_TYPE.PICTURE) == 2
-    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 3
+    assert _count(shapes, MSO_SHAPE_TYPE.AUTO_SHAPE) == 1
     assert _count(shapes, MSO_SHAPE_TYPE.TEXT_BOX) == 1
     by_name = {shape.name: shape for shape in shapes}
     roi = next(element for element in result.elements if element.kind == "roi")
@@ -129,6 +128,8 @@ def test_roi_exports_an_independent_shape_and_crops_only_the_zoom(tmp_path):
     assert by_name["拡大画像（画像）"].crop_right == pytest.approx(0.7)
     assert by_name["拡大画像（画像）"].crop_bottom == pytest.approx(0.2)
     assert by_name["ROI"].shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE
+    assert by_name["ROI"]._element.find(qn("p:style")) is None
+    assert str(by_name["ROI"].line.color.rgb) == "FF0000"
     with zipfile.ZipFile(destination) as archive:
         blobs = [archive.read(name) for name in archive.namelist() if name.startswith("ppt/media/")]
     assert original in blobs

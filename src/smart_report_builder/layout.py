@@ -85,9 +85,19 @@ def layout_slide(project: Project) -> LayoutResult:
     note_bounds = bounds if design.body is not None else Rect(0, 0, design.slide_width_pt, design.slide_height_pt)
     _apply_rois(elements, project, image_assets, violations, note_bounds)
     _annotate_geometry(elements, design, violations)
-    title_text = None
+    title_text = project.slide.title.strip()
     if design.orientation:
-        title_text = project.slide.title.strip() or design.page_title or "撮像画像"
+        title_text = title_text or design.page_title or "撮像画像"
+    else:
+        title_text = title_text or None
+    title_frame = design.title_frame
+    if title_text and title_frame is None:
+        title_frame = Rect(
+            x=design.margin_pt,
+            y=8,
+            width=max(0.0, design.slide_width_pt - (2 * design.margin_pt)),
+            height=28,
+        )
     return LayoutResult(
         schema_version=LAYOUT_SCHEMA_VERSION,
         slide_width_pt=design.slide_width_pt,
@@ -98,7 +108,7 @@ def layout_slide(project: Project) -> LayoutResult:
         template_path=design.template_path,
         chrome_image=design.chrome_image,
         title_text=title_text,
-        title_frame=design.title_frame,
+        title_frame=title_frame,
         title_font=design.title_font,
         title_font_pt=design.title_font_pt,
         title_color=design.title_color,
@@ -179,6 +189,25 @@ def _place(
     raise TypeError(f"unknown element: {type(node)!r}")
 
 
+def _is_overlay_text(node: Element) -> bool:
+    return isinstance(node, TextNode) and node.free_rect is not None
+
+
+def _is_hidden_text(node: Element) -> bool:
+    return isinstance(node, TextNode) and not node.shown and node.free_rect is None
+
+
+def _mapped_free(rect: Rect, box: Rect | None) -> Rect:
+    if box is None:
+        return rect
+    return Rect(
+        rect.x + box.x * rect.width,
+        rect.y + box.y * rect.height,
+        max(0.0, box.width) * rect.width,
+        max(0.0, box.height) * rect.height,
+    )
+
+
 def _place_stack(
     node: StackNode,
     rect: Rect,
@@ -188,11 +217,28 @@ def _place_stack(
     violations: list[LayoutViolation],
     image_assets: dict[str, Asset],
 ) -> None:
+    overlays = [child for child in node.children if _is_overlay_text(child)]
+    node = StackNode(
+        id=node.id,
+        direction=node.direction,
+        children=_lead_texts(
+            [
+                child
+                for child in node.children
+                if not _is_overlay_text(child) and not _is_hidden_text(child)
+            ]
+        ),
+        gap_pt=node.gap_pt,
+        track_aspect=node.track_aspect,
+        emphasize_first=node.emphasize_first,
+    )
     children = node.children
     if not children:
+        _place_overlays(overlays, rect, bindings, elements)
         return
     if _is_free_canvas(node):
         _place_free_frames(node, rect, assets, bindings, elements, violations, image_assets)
+        _place_overlays(overlays, rect, bindings, elements)
         return
     sizes = _axis_sizes(node, rect, assets, bindings)
     horizontal = node.direction == StackDirection.HORIZONTAL
@@ -213,6 +259,30 @@ def _place_stack(
             child_rect = Rect(rect.x, cursor, rect.width, size)
         cursor += size + node.gap_pt
         _place(child, child_rect, assets, bindings, elements, violations, image_assets, rect)
+    _place_overlays(overlays, rect, bindings, elements)
+
+
+def _lead_texts(children: list[Element]) -> list[Element]:
+    """place が before の文章を、画像ブロックより前へ出す。"""
+    lead = [
+        child
+        for child in children
+        if isinstance(child, TextNode) and child.place == "before"
+    ]
+    if not lead:
+        return children
+    return [*lead, *[child for child in children if child not in lead]]
+
+
+def _place_overlays(
+    overlays: list[Element],
+    rect: Rect,
+    bindings: dict[str, Binding],
+    elements: list[PlacedElement],
+) -> None:
+    for child in overlays:
+        if isinstance(child, TextNode):
+            _place_text(child, _mapped_free(rect, child.free_rect), bindings, elements)
 
 
 def _axis_sizes(
@@ -309,11 +379,18 @@ def _place_grid(
     violations: list[LayoutViolation],
     image_assets: dict[str, Asset],
 ) -> None:
-    children = node.children
+    overlays = [child for child in node.children if _is_overlay_text(child)]
+    children = [
+        child
+        for child in node.children
+        if not _is_overlay_text(child) and not _is_hidden_text(child)
+    ]
     if not children:
+        _place_overlays(overlays, rect, bindings, elements)
         return
     if _is_free_canvas(node):
         _place_free_frames(node, rect, assets, bindings, elements, violations, image_assets)
+        _place_overlays(overlays, rect, bindings, elements)
         return
     columns = node.columns
     if columns < 1:
@@ -324,6 +401,7 @@ def _place_grid(
                 message="格子の列数が不正",
             )
         )
+        _place_overlays(overlays, rect, bindings, elements)
         return
     rows = (len(children) + columns - 1) // columns
     cell_w = (rect.width - node.gap_pt * (columns - 1)) / columns
@@ -348,6 +426,7 @@ def _place_grid(
             height,
         )
         _place(child, child_rect, assets, bindings, elements, violations, image_assets, rect)
+    _place_overlays(overlays, rect, bindings, elements)
 
 
 def _is_free_canvas(node: StackNode | GridNode) -> bool:
@@ -388,6 +467,11 @@ def _place_image(
     image_assets: dict[str, Asset],
     group: Rect,
 ) -> None:
+    binding = bindings.get(node.id)
+    heading = "" if binding is None or binding.text is None else binding.text.strip()
+    anchor = "below" if binding is not None and binding.text_anchor == "below" else "above"
+    font_pt = 14.0 if binding is None or binding.font_pt is None else float(binding.font_pt)
+    image_rect, label_rect = _split_heading(rect, heading, anchor, font_pt)
     if node.fit_mode == FitMode.ROI:
         elements.append(
             PlacedElement(
@@ -395,12 +479,15 @@ def _place_image(
                 kind="image_frame",
                 role_id=node.role_id,
                 display_name=node.display_name,
-                frame=rect,
+                frame=image_rect,
                 content_rect=None,
-                text=None,
+                text=heading or None,
                 asset_path=None,
                 fit_mode=FitMode.ROI.value,
                 group_frame=group,
+                text_anchor=anchor if heading else None,
+                label_frame=label_rect,
+                font_pt=font_pt if heading else None,
             )
         )
         return
@@ -410,7 +497,6 @@ def _place_image(
             "画像をトリミングせず処理を止めた。対応しているのは contain と roi です。"
         )
 
-    binding = bindings.get(node.id)
     asset: Asset | None = None
     if binding is None or binding.asset_id is None:
         violations.append(
@@ -433,7 +519,7 @@ def _place_image(
 
     content: Rect | None = None
     asset_path = asset.path if asset is not None else None
-    if rect.width <= _EPS or rect.height <= _EPS:
+    if image_rect.width <= _EPS or image_rect.height <= _EPS:
         violations.append(
             LayoutViolation(
                 code="overflow",
@@ -450,7 +536,7 @@ def _place_image(
             )
         )
     elif asset is not None:
-        content = contain_rect(rect, asset.width_px, asset.height_px)
+        content = contain_rect(image_rect, asset.width_px, asset.height_px)
         image_assets[node.id] = asset
 
     elements.append(
@@ -459,12 +545,15 @@ def _place_image(
             kind="image_frame",
             role_id=node.role_id,
             display_name=node.display_name,
-            frame=rect,
+            frame=image_rect,
             content_rect=content,
-            text=None if binding is None else binding.text,
+            text=heading or None,
             asset_path=asset_path,
             fit_mode=FitMode.CONTAIN.value,
             group_frame=group,
+            text_anchor=anchor if heading else None,
+            label_frame=label_rect,
+            font_pt=font_pt if heading else None,
         )
     )
 
@@ -509,8 +598,23 @@ def _place_text(
             text=text,
             asset_path=None,
             fit_mode=FitMode.CONTAIN.value,
+            font_pt=node.font_pt,
         )
     )
+
+
+def _split_heading(rect: Rect, heading: str, anchor: str, font_pt: float) -> tuple[Rect, Rect | None]:
+    """見出しは画像枠の外。戻り値は画像枠と、その上下に付ける見出し枠。"""
+    if not heading.strip():
+        return rect, None
+    band = min(max(font_pt * 1.35, font_pt + 4.0), rect.height * 0.45)
+    if anchor == "below":
+        image = Rect(rect.x, rect.y, rect.width, max(0.0, rect.height - band))
+        label = Rect(rect.x, rect.y + image.height, rect.width, min(band, rect.height))
+        return image, label
+    label = Rect(rect.x, rect.y, rect.width, min(band, rect.height))
+    image = Rect(rect.x, rect.y + label.height, rect.width, max(0.0, rect.height - label.height))
+    return image, label
 
 
 _NOTE_WIDTH_PT = 180.0
@@ -570,6 +674,7 @@ def _apply_rois(
                 fit_mode=FitMode.ROI.value,
                 crop=normalized,
                 source_element_id=source.element_id,
+                zoom_element_id=roi.zoom_element_id,
             )
         )
         _append_roi_note(elements, roi, elements[-1].frame, bounds)
@@ -598,12 +703,15 @@ def _apply_rois(
                     normalized.width * asset.width_px,
                     normalized.height * asset.height_px,
                 ),
-                text=None,
+                text=zoom.text,
                 asset_path=asset.path,
                 fit_mode=FitMode.ROI.value,
                 crop=normalized,
                 source_element_id=source.element_id,
                 group_frame=zoom.group_frame,
+                text_anchor=zoom.text_anchor,
+                label_frame=zoom.label_frame,
+                font_pt=zoom.font_pt,
             ),
         )
 
@@ -835,7 +943,11 @@ def _annotate_geometry(
                     message="要素がスライドの外にはみ出している",
                 )
             )
-        if element.kind in {"image_frame", "text"} and _tight(element.frame):
+        if (
+            element.kind in {"image_frame", "text"}
+            and element.role_id != "note"
+            and _tight(element.frame)
+        ):
             violations.append(
                 LayoutViolation(
                     code="overflow",
@@ -851,7 +963,11 @@ def _annotate_geometry(
                     message="描画矩形が画像枠の外にはみ出している",
                 )
             )
-        if element.kind == "text" and _text_is_clipped(element.frame, element.text or ""):
+        if element.kind == "text" and _text_is_clipped(
+            element.frame,
+            element.text or "",
+            element.font_pt or _TEXT_FONT_PT,
+        ):
             violations.append(
                 LayoutViolation(
                     code="text_overflow",
@@ -862,6 +978,8 @@ def _annotate_geometry(
     for index, left in enumerate(elements):
         for right in elements[index + 1 :]:
             if left.kind in _OVERLAY_KINDS or right.kind in _OVERLAY_KINDS:
+                continue
+            if left.role_id == "note" or right.role_id == "note":
                 continue
             if _overlap(left.frame, right.frame):
                 violations.append(
@@ -876,26 +994,28 @@ def _annotate_geometry(
 _TEXT_FONT_PT = 16.0
 
 
-def _text_is_clipped(frame: Rect, text: str) -> bool:
-    """16pt・行高 1 の見積もり。文字は削らず、枠より多くなるときだけ真にする。"""
+def _text_is_clipped(frame: Rect, text: str, font_pt: float = _TEXT_FONT_PT) -> bool:
+    """指定サイズ・行高 1 の見積もり。文字は削らず、枠より多くなるときだけ真にする。"""
     if not text or frame.width <= _EPS or frame.height <= _EPS:
         return False
-    capacity = int(frame.height // _TEXT_FONT_PT)
+    size = font_pt if font_pt > 0 else _TEXT_FONT_PT
+    capacity = int(frame.height // size)
     if capacity < 1:
         return True
     needed = 0
     for paragraph in text.split("\n"):
-        needed += _wrapped_lines(paragraph, frame.width)
+        needed += _wrapped_lines(paragraph, frame.width, size)
     return needed > capacity
 
 
-def _wrapped_lines(paragraph: str, width: float) -> int:
+def _wrapped_lines(paragraph: str, width: float, font_pt: float = _TEXT_FONT_PT) -> int:
     if paragraph == "":
         return 1
     lines = 1
     used = 0.0
+    scale = font_pt / _TEXT_FONT_PT if _TEXT_FONT_PT else 1.0
     for char in paragraph:
-        advance = _char_width(char)
+        advance = _char_width(char) * scale
         if used > 0 and used + advance > width + _EPS:
             lines += 1
             used = advance

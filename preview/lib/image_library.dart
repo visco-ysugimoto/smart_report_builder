@@ -39,6 +39,7 @@ class LibraryImage {
     this.listIndex,
     this.note = '',
     this.source = '',
+    this.included = true,
   });
 
   final String id;
@@ -53,6 +54,25 @@ class LibraryImage {
   final int? listIndex;
   final String note;
   final String source;
+  final bool included;
+
+  LibraryImage copyWith({bool? included}) {
+    return LibraryImage(
+      id: id,
+      name: name,
+      sourceId: sourceId,
+      filePath: filePath,
+      archiveEntry: archiveEntry,
+      group: group,
+      task: task,
+      listName: listName,
+      listComment: listComment,
+      listIndex: listIndex,
+      note: note,
+      source: source,
+      included: included ?? this.included,
+    );
+  }
 }
 
 class LibraryGroup {
@@ -88,6 +108,131 @@ class LibrarySource {
 
   int get imageCount =>
       groups.fold(0, (sum, group) => sum + group.images.length);
+}
+
+/// 保存済みの素材から、画面を開き直しても残る画像一覧を作る。
+LibrarySource? librarySourceFromProject({
+  required String projectJson,
+  required String projectDirectory,
+  String sourceId = 'project-assets',
+}) {
+  final decoded = jsonDecode(projectJson);
+  if (decoded is! Map) return null;
+  final assets = decoded['assets'];
+  if (assets is! List || assets.isEmpty) return null;
+  final rows = <_ProjectAsset>[];
+  for (final raw in assets) {
+    if (raw is! Map) continue;
+    final stored = raw['path']?.toString() ?? '';
+    if (stored.isEmpty) continue;
+    final index = raw['listIndex'];
+    rows.add(
+      _ProjectAsset(
+        path: _resolveStoredPath(stored, projectDirectory),
+        name: (raw['fileName'] ?? raw['displayName'] ?? '').toString(),
+        group: raw['group']?.toString() ?? '',
+        task: raw['task']?.toString() ?? '',
+        listName: raw['listName']?.toString() ?? '',
+        listComment: raw['listComment']?.toString(),
+        listIndex: index is num ? index.toInt() : rows.length + 1,
+        note: raw['note']?.toString() ?? '',
+        label: _projectAssetLabel(raw),
+      ),
+    );
+  }
+  if (rows.isEmpty) return null;
+  rows.sort((a, b) => a.listIndex.compareTo(b.listIndex));
+  final grouped = <String, List<_ProjectAsset>>{};
+  for (final row in rows) {
+    grouped.putIfAbsent(row.label, () => []).add(row);
+  }
+  final groups = [
+    for (final entry in grouped.entries)
+      LibraryGroup(
+        id: '$sourceId:${entry.key}',
+        label: entry.key,
+        images: [
+          for (final row in entry.value)
+            LibraryImage(
+              id: '$sourceId:${row.listIndex}:${row.path}',
+              name: row.name.isEmpty ? row.path.split(RegExp(r'[\\/]')).last : row.name,
+              sourceId: sourceId,
+              filePath: row.path,
+              group: row.group,
+              task: row.task,
+              listName: row.listName,
+              listComment: row.listComment,
+              listIndex: row.listIndex,
+              note: row.note,
+              source: 'folder',
+            ),
+        ],
+      ),
+  ];
+  return LibrarySource(
+    id: sourceId,
+    kind: LibrarySourceKind.files,
+    label: '登録した画像',
+    origin: projectDirectory,
+    groups: groups,
+  );
+}
+
+class _ProjectAsset {
+  const _ProjectAsset({
+    required this.path,
+    required this.name,
+    required this.group,
+    required this.task,
+    required this.listName,
+    required this.listComment,
+    required this.listIndex,
+    required this.note,
+    required this.label,
+  });
+
+  final String path;
+  final String name;
+  final String group;
+  final String task;
+  final String listName;
+  final String? listComment;
+  final int listIndex;
+  final String note;
+  final String label;
+}
+
+String _projectAssetLabel(Map raw) {
+  final comment = raw['listComment']?.toString() ?? '';
+  if (comment.isNotEmpty) return comment;
+  final name = raw['listName']?.toString() ?? '';
+  if (name.isNotEmpty) return name;
+  final group = raw['group']?.toString() ?? '';
+  final task = raw['task']?.toString() ?? '';
+  if (group.isNotEmpty || task.isNotEmpty) return '$group / $task';
+  return '画像';
+}
+
+String _resolveStoredPath(String stored, String directory) {
+  final normalized = stored.replaceAll('\\', '/');
+  final absolute = normalized.startsWith('/') ||
+      normalized.startsWith('//') ||
+      RegExp(r'^[A-Za-z]:/').hasMatch(normalized);
+  if (absolute || directory.isEmpty) {
+    return stored.replaceAll('/', Platform.pathSeparator);
+  }
+  final base = directory.replaceAll('\\', '/').replaceAll(RegExp(r'/+$'), '');
+  final parts = [...base.split('/'), ...normalized.split('/')];
+  final stack = <String>[];
+  for (final part in parts) {
+    if (part.isEmpty || part == '.') continue;
+    if (part == '..') {
+      if (stack.isNotEmpty && !stack.last.endsWith(':')) stack.removeLast();
+      continue;
+    }
+    stack.add(part);
+  }
+  return stack.join(Platform.pathSeparator);
 }
 
 class NamedGroup {

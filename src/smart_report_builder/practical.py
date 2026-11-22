@@ -485,18 +485,16 @@ def add_image_frame(project: Project) -> str:
 
 _FRAME_KINDS = {
     "image": ("image", FitMode.CONTAIN, "画像"),
-    "overall": ("overall", FitMode.CONTAIN, "全体画像"),
-    "comparison": ("comparison", FitMode.CONTAIN, "比較画像"),
     "zoom": ("zoom", FitMode.ROI, "拡大画像"),
 }
+# 以前の役割名。種類は画像にまとめる。
+_IMAGE_KIND_ALIASES = {"overall", "comparison"}
 
 
 def image_frame_kind(frame: ImageFrameNode) -> str:
-    """画像枠の種類。拡大は表示モード、それ以外は役割で決める。"""
+    """画像枠の種類。拡大か、それ以外の画像か。"""
     if frame.fit_mode == FitMode.ROI:
         return "zoom"
-    if frame.role_id in {"overall", "comparison", "image"}:
-        return frame.role_id
     return "image"
 
 
@@ -506,17 +504,19 @@ def set_image_frame_kind(project: Project, element_id: str, kind: str) -> str:
     拡大にすると、その枠に描いていた ROI は外す。拡大先だった枠を通常の画像に戻すと、
     その枠への連動だけ外し、元画像の上の ROI 矩形は残す。
     """
+    if kind in _IMAGE_KIND_ALIASES:
+        kind = "image"
     if kind not in _FRAME_KINDS:
-        raise ValueError("種類は画像、全体画像、比較画像、拡大のいずれかです")
+        raise ValueError("種類は画像か拡大画像です")
     frame = _find_image_frame(project.content_master.root, element_id)
     if frame is None:
         raise ValueError("画像枠が見つからない")
     if frame.fit_mode not in {FitMode.CONTAIN, FitMode.ROI}:
         raise ValueError("この画像枠の種類は変更できません")
-    previous = image_frame_kind(frame)
-    if previous == kind:
-        return element_id
     role_id, fit_mode, _base = _FRAME_KINDS[kind]
+    previous = image_frame_kind(frame)
+    if previous == kind and frame.role_id == role_id:
+        return element_id
     taken = {
         item.display_name
         for item in _image_frames(project.content_master.root)
