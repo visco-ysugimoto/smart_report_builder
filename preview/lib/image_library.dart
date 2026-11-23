@@ -56,7 +56,12 @@ class LibraryImage {
   final String source;
   final bool included;
 
-  LibraryImage copyWith({bool? included}) {
+  LibraryImage copyWith({
+    bool? included,
+    int? listIndex,
+    String? listComment,
+    bool clearComment = false,
+  }) {
     return LibraryImage(
       id: id,
       name: name,
@@ -66,8 +71,8 @@ class LibraryImage {
       group: group,
       task: task,
       listName: listName,
-      listComment: listComment,
-      listIndex: listIndex,
+      listComment: clearComment ? null : (listComment ?? this.listComment),
+      listIndex: listIndex ?? this.listIndex,
       note: note,
       source: source,
       included: included ?? this.included,
@@ -314,6 +319,332 @@ bool isLibraryImagePath(String path) {
   );
 }
 
+class PathClassification {
+  const PathClassification({required this.byGroupId, required this.unmatched});
+
+  final Map<String, List<String>> byGroupId;
+  final List<String> unmatched;
+}
+
+/// ファイル名に分類名が含まれる画像を、そのコメントのグループへ振り分ける。
+///
+/// 長い分類名を優先する。英数字だけの 1 文字は誤って当たるので使わない。
+PathClassification classifyPathsByFileName(List<String> paths, List<LibraryGroup> groups) {
+  final tokens = <({String groupId, String token})>[];
+  for (final group in groups) {
+    final token = commentToken(group);
+    if (token == null || !_usableCommentToken(token)) continue;
+    tokens.add((groupId: group.id, token: token.toLowerCase()));
+  }
+  tokens.sort((a, b) => b.token.length.compareTo(a.token.length));
+  final byGroupId = <String, List<String>>{};
+  final unmatched = <String>[];
+  for (final path in paths) {
+    if (!isLibraryImagePath(path)) continue;
+    final name = libraryBaseName(path).toLowerCase();
+    String? hit;
+    for (final item in tokens) {
+      if (name.contains(item.token)) {
+        hit = item.groupId;
+        break;
+      }
+    }
+    if (hit == null) {
+      unmatched.add(path);
+    } else {
+      byGroupId.putIfAbsent(hit, () => []).add(path);
+    }
+  }
+  return PathClassification(byGroupId: byGroupId, unmatched: unmatched);
+}
+
+bool isCatchAllGroup(LibraryGroup group) {
+  final label = group.label.trim();
+  return label == 'その他' || label.endsWith(' / その他');
+}
+
+String? commentToken(LibraryGroup group) {
+  if (group.images.isNotEmpty) {
+    final comment = group.images.first.listComment?.trim() ?? '';
+    if (comment.isNotEmpty) return comment;
+    final listName = group.images.first.listName.trim();
+    if (listName.isNotEmpty) return listName;
+  }
+  const marker = ' / ';
+  final at = group.label.lastIndexOf(marker);
+  if (at < 0) {
+    if (group.images.isNotEmpty || isCatchAllGroup(group)) return null;
+    final label = group.label.trim();
+    if (label.isEmpty) return null;
+    return label;
+  }
+  final tail = group.label.substring(at + marker.length).trim();
+  if (tail.isEmpty || tail == 'その他') return null;
+  return tail;
+}
+
+bool _usableCommentToken(String token) {
+  if (token.runes.any((rune) => rune > 127)) return true;
+  return token.length >= 2;
+}
+
+bool sourceGroupsByComment(LibrarySource source) {
+  if (source.kind == LibrarySourceKind.vtv || source.kind == LibrarySourceKind.taskFile) {
+    return true;
+  }
+  return source.groups.any((group) {
+    if (group.images.any((image) => (image.listComment ?? '').trim().isNotEmpty)) {
+      return true;
+    }
+    return group.images.isEmpty && commentToken(group) != null;
+  });
+}
+
+const _filenameNoise = {
+  'img',
+  'image',
+  'images',
+  'dsc',
+  'pic',
+  'pics',
+  'photo',
+  'photos',
+  'copy',
+  'scan',
+  'camera',
+};
+
+/// フォルダ内の画像を、ファイル名の分類語で分ける。
+///
+/// 「傷」「汚れ」のような語は1枚でも分類にする。英数字の語は2枚以上で共通するときだけ分類にする。
+/// 分類語が1つも無いときは null を返し、呼び出し側がサブフォルダ分けを使う。
+List<LibraryGroup>? groupsByFilename({
+  required String sourceId,
+  required List<String> paths,
+}) {
+  final tokensByPath = <String, List<String>>{};
+  final display = <String, String>{};
+  final counts = <String, int>{};
+  for (final path in paths) {
+    if (!isLibraryImagePath(path)) continue;
+    final tokens = filenameCategoryTokens(path);
+    tokensByPath[path] = tokens;
+    for (final token in tokens.toSet()) {
+      counts[token] = (counts[token] ?? 0) + 1;
+      display.putIfAbsent(token, () => _tokenDisplay(path, token));
+    }
+  }
+  final chosen = <String, String?>{};
+  var categorized = 0;
+  for (final entry in tokensByPath.entries) {
+    final token = _pickCategoryToken(entry.value, counts);
+    chosen[entry.key] = token;
+    if (token != null) categorized += 1;
+  }
+  if (categorized == 0) return null;
+  final buckets = <String, List<String>>{};
+  final other = <String>[];
+  for (final entry in chosen.entries) {
+    final token = entry.value;
+    if (token == null) {
+      other.add(entry.key);
+    } else {
+      buckets.putIfAbsent(token, () => []).add(entry.key);
+    }
+  }
+  final keys = buckets.keys.toList()..sort();
+  final groups = <LibraryGroup>[
+    for (final token in keys) _folderGroup(sourceId, display[token] ?? token, buckets[token]!, token),
+  ];
+  if (other.isNotEmpty) {
+    groups.add(_folderGroup(sourceId, 'その他', other, null));
+  }
+  return groups;
+}
+
+List<String> filenameCategoryTokens(String path) {
+  final stem = _fileStem(path);
+  final parts = stem.split(RegExp(r'[\s_\-・･．.]+'));
+  final tokens = <String>[];
+  for (final part in parts) {
+    final token = part.trim().toLowerCase();
+    if (!_usableCategoryToken(token)) continue;
+    tokens.add(token);
+  }
+  return tokens;
+}
+
+bool _usableCategoryToken(String token) {
+  if (token.isEmpty || _filenameNoise.contains(token)) return false;
+  if (RegExp(r'^\d+$').hasMatch(token)) return false;
+  return _usableCommentToken(token);
+}
+
+String? _pickCategoryToken(List<String> tokens, Map<String, int> counts) {
+  if (tokens.isEmpty) return null;
+  final unique = tokens.toSet().toList();
+  int rank(String token) {
+    var value = token.length;
+    if ((counts[token] ?? 0) >= 2) value += 1000;
+    if (_isJapaneseToken(token)) value += 10000;
+    return value;
+  }
+
+  unique.sort((a, b) => rank(b).compareTo(rank(a)));
+  for (final token in unique) {
+    if (_isJapaneseToken(token) || (counts[token] ?? 0) >= 2) return token;
+  }
+  return null;
+}
+
+bool _isJapaneseToken(String token) => token.runes.any((rune) => rune > 127);
+
+String _tokenDisplay(String path, String token) {
+  final stem = _fileStem(path);
+  final match = RegExp(RegExp.escape(token), caseSensitive: false).firstMatch(stem);
+  if (match == null) return token;
+  return stem.substring(match.start, match.end);
+}
+
+String _fileStem(String path) {
+  final base = libraryBaseName(path);
+  final dot = base.lastIndexOf('.');
+  if (dot <= 0) return base;
+  return base.substring(0, dot);
+}
+
+LibraryGroup _folderGroup(String sourceId, String label, List<String> paths, String? comment) {
+  final sorted = [...paths]..sort((a, b) => libraryBaseName(a).toLowerCase().compareTo(libraryBaseName(b).toLowerCase()));
+  return LibraryGroup(
+    id: '$sourceId:${comment ?? 'other'}',
+    label: label,
+    images: [
+      for (var index = 0; index < sorted.length; index++)
+        LibraryImage(
+          id: '$sourceId:${comment ?? 'other'}:${sorted[index]}',
+          name: libraryBaseName(sorted[index]),
+          sourceId: sourceId,
+          filePath: sorted[index],
+          listComment: comment,
+          listIndex: index + 1,
+          source: 'folder',
+        ),
+    ],
+  );
+}
+
+List<LibraryImage> imagesForGroup({
+  required String sourceId,
+  required LibraryGroup group,
+  required List<String> paths,
+  required Set<String> existingPaths,
+}) {
+  final sample = group.images.isEmpty ? null : group.images.first;
+  var nextIndex = 0;
+  for (final image in group.images) {
+    final index = image.listIndex ?? 0;
+    if (index > nextIndex) nextIndex = index;
+  }
+  final images = <LibraryImage>[];
+  final seen = {...existingPaths};
+  for (final path in paths) {
+    if (!isLibraryImagePath(path)) continue;
+    final key = _normalizedPath(path);
+    if (!seen.add(key)) continue;
+    nextIndex += 1;
+    images.add(
+      LibraryImage(
+        id: '$sourceId:${group.id}:$path',
+        name: libraryBaseName(path),
+        sourceId: sourceId,
+        filePath: path,
+        group: sample?.group ?? '',
+        task: sample?.task ?? '',
+        listName: sample?.listName ?? '',
+        listComment: (sample?.listComment?.trim().isNotEmpty ?? false)
+            ? sample!.listComment
+            : commentToken(group),
+        listIndex: nextIndex,
+        note: '',
+        source: sample?.source.isNotEmpty == true ? sample!.source : 'folder',
+      ),
+    );
+  }
+  return images;
+}
+
+String _normalizedPath(String path) => path.replaceAll('\\', '/').toLowerCase();
+
+Set<String> libraryPathsIn(LibrarySource source) {
+  return {
+    for (final group in source.groups)
+      for (final image in group.images)
+        if (image.filePath != null) _normalizedPath(image.filePath!),
+  };
+}
+
+String _encodePowerShell(String script) {
+  final units = script.codeUnits;
+  final bytes = Uint8List(units.length * 2);
+  for (var index = 0; index < units.length; index++) {
+    bytes[index * 2] = units[index] & 0xff;
+    bytes[index * 2 + 1] = (units[index] >> 8) & 0xff;
+  }
+  return base64Encode(bytes);
+}
+
+/// クリップボードの画像ファイル、またはコピーされた画像を一時 PNG にして返す。
+Future<List<String>> clipboardImagePaths(Directory directory) async {
+  await directory.create(recursive: true);
+  final stamp = DateTime.now().microsecondsSinceEpoch;
+  final png = File('${directory.path}${Platform.pathSeparator}clipboard_$stamp.png');
+  final pngLiteral = png.path.replaceAll("'", "''");
+  // スクリプトファイルは実行ポリシーで止まる。コマンドとして渡すと、この起動だけが対象になる。
+  final script = """
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+\$files = [System.Windows.Forms.Clipboard]::GetFileDropList()
+if (\$files -ne \$null -and \$files.Count -gt 0) {
+  foreach (\$file in \$files) { Write-Output \$file }
+  exit 0
+}
+if ([System.Windows.Forms.Clipboard]::ContainsImage()) {
+  \$image = [System.Windows.Forms.Clipboard]::GetImage()
+  if (\$image -eq \$null) { exit 2 }
+  \$image.Save('$pngLiteral', [System.Drawing.Imaging.ImageFormat]::Png)
+  Write-Output '$pngLiteral'
+  exit 0
+}
+exit 2
+""";
+  final result = await Process.run(
+    'powershell.exe',
+    [
+      '-STA',
+      '-NoProfile',
+      '-ExecutionPolicy',
+      'Bypass',
+      '-EncodedCommand',
+      _encodePowerShell(script),
+    ],
+  );
+  if (result.exitCode == 2) {
+    throw const FormatException('クリップボードに画像がありません');
+  }
+  if (result.exitCode != 0) {
+    final message = result.stderr.toString().trim();
+    throw FormatException(message.isEmpty ? 'クリップボードを読めません' : message);
+  }
+  final paths = [
+    for (final line in result.stdout.toString().split(RegExp(r'\r?\n')))
+      if (line.trim().isNotEmpty && isLibraryImagePath(line.trim())) line.trim(),
+  ];
+  if (paths.isEmpty) {
+    throw const FormatException('クリップボードに画像がありません');
+  }
+  return paths;
+}
+
 String libraryBaseName(String path) {
   final normalized = path.replaceAll('\\', '/');
   final slash = normalized.lastIndexOf('/');
@@ -511,27 +842,11 @@ Future<LibrarySource> loadFolderImages({
   if (files.isEmpty) {
     throw const FormatException('フォルダ内に画像がありません');
   }
-  final byDir = <String, List<File>>{};
-  for (final file in files) {
-    byDir.putIfAbsent(_relativeDir(root.path, file.path), () => []).add(file);
-  }
-  final keys = byDir.keys.toList()..sort();
-  final groups = <LibraryGroup>[];
-  for (final key in keys) {
-    final label = key.isEmpty ? libraryBaseName(root.path) : key;
-    final images = [
-      for (final file in byDir[key]!)
-        LibraryImage(
-          id: '$sourceId:${file.path}',
-          name: libraryBaseName(file.path),
-          sourceId: sourceId,
-          filePath: file.path,
-        ),
-    ];
-    groups.add(
-      LibraryGroup(id: '$sourceId:$key', label: label, images: images),
-    );
-  }
+  final byName = groupsByFilename(
+    sourceId: sourceId,
+    paths: [for (final file in files) file.path],
+  );
+  final groups = byName ?? _groupsBySubfolder(sourceId, root.path, files);
   return LibrarySource(
     id: sourceId,
     kind: LibrarySourceKind.folder,
@@ -540,6 +855,32 @@ Future<LibrarySource> loadFolderImages({
     groups: groups,
     truncated: truncated,
   );
+}
+
+List<LibraryGroup> _groupsBySubfolder(String sourceId, String rootPath, List<File> files) {
+  final byDir = <String, List<File>>{};
+  for (final file in files) {
+    byDir.putIfAbsent(_relativeDir(rootPath, file.path), () => []).add(file);
+  }
+  final keys = byDir.keys.toList()..sort();
+  return [
+    for (final key in keys)
+      LibraryGroup(
+        id: '$sourceId:$key',
+        label: key.isEmpty ? libraryBaseName(rootPath) : key,
+        images: [
+          for (var index = 0; index < byDir[key]!.length; index++)
+            LibraryImage(
+              id: '$sourceId:${byDir[key]![index].path}',
+              name: libraryBaseName(byDir[key]![index].path),
+              sourceId: sourceId,
+              filePath: byDir[key]![index].path,
+              listIndex: index + 1,
+              source: 'folder',
+            ),
+        ],
+      ),
+  ];
 }
 
 LibrarySource sourceFromFiles({
@@ -556,19 +897,29 @@ LibrarySource sourceFromFiles({
           filePath: path,
         ),
   ];
-  if (images.isEmpty) {
+  final numbered = [
+    for (var index = 0; index < images.length; index++)
+      LibraryImage(
+        id: images[index].id,
+        name: images[index].name,
+        sourceId: images[index].sourceId,
+        filePath: images[index].filePath,
+        listIndex: index + 1,
+      ),
+  ];
+  if (numbered.isEmpty) {
     throw const FormatException('画像ファイルがありません');
   }
-  final label = images.length == 1
-      ? images.single.name
-      : 'ファイル ${images.length} 件';
+  final label = numbered.length == 1
+      ? numbered.single.name
+      : 'ファイル ${numbered.length} 件';
   return LibrarySource(
     id: sourceId,
     kind: LibrarySourceKind.files,
     label: label,
     origin: paths.join('|'),
     groups: [
-      LibraryGroup(id: '$sourceId:files', label: label, images: images),
+      LibraryGroup(id: '$sourceId:files', label: label, images: numbered),
     ],
   );
 }

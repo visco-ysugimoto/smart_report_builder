@@ -89,6 +89,9 @@ class MasterSlideScreen extends StatelessWidget {
                               onTextSize: (textId, size) async {
                                 await service.setTextSize(textId: textId, size: size);
                               },
+                              onCaptionHeight: (textId, height) async {
+                                await service.setCaptionHeight(height);
+                              },
                               onMoveText: (textId, x, y, width, height) async {
                                 await service.moveFreeText(
                                   textId: textId,
@@ -103,6 +106,15 @@ class MasterSlideScreen extends StatelessWidget {
                               },
                               onDeleteText: (textId) async {
                                 await service.deleteFreeText(textId: textId);
+                              },
+                              onResizeFrame: (frameId, x, y, width, height) async {
+                                await service.resizeFrame(
+                                  frameId: frameId,
+                                  x: x,
+                                  y: y,
+                                  width: width,
+                                  height: height,
+                                );
                               },
                             ),
                           ),

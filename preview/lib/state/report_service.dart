@@ -104,6 +104,58 @@ class ReportService {
     }
   }
 
+  Future<void> undo() async {
+    if (!_state.hasOpenProject || _state.busy || !_state.canUndo) return;
+    final projectPath = _state.projectPath!;
+    final python = _requirePython(_state.projectDirectory!);
+    _state.setBusy(true, status: '元に戻しています');
+    try {
+      final res = await reportSession.run(python, [
+        'undo',
+        projectPath,
+        '--layout',
+        _state.layoutPath!,
+        '--pptx',
+        _state.pptxPath!,
+      ]);
+      _throwOnError(res, '操作を戻せません');
+      await _refresh();
+      final active = _activeSlideId();
+      if (active != null) _state.selectSlide(active);
+      _state.setStatus('元に戻しました');
+    } catch (exc) {
+      _state.setError(exc.toString());
+    } finally {
+      _state.setBusy(false);
+    }
+  }
+
+  Future<void> redo() async {
+    if (!_state.hasOpenProject || _state.busy || !_state.canRedo) return;
+    final projectPath = _state.projectPath!;
+    final python = _requirePython(_state.projectDirectory!);
+    _state.setBusy(true, status: 'やり直しています');
+    try {
+      final res = await reportSession.run(python, [
+        'redo',
+        projectPath,
+        '--layout',
+        _state.layoutPath!,
+        '--pptx',
+        _state.pptxPath!,
+      ]);
+      _throwOnError(res, '操作をやり直せません');
+      await _refresh();
+      final active = _activeSlideId();
+      if (active != null) _state.selectSlide(active);
+      _state.setStatus('やり直しました');
+    } catch (exc) {
+      _state.setError(exc.toString());
+    } finally {
+      _state.setBusy(false);
+    }
+  }
+
   Future<void> save() async {
     if (!_state.hasOpenProject) return;
     _state.setBusy(true, status: '保存しています');
@@ -118,8 +170,20 @@ class ReportService {
     }
   }
 
-  /// マスターのレイアウトプリセットを変える。
-  Future<void> pickLayout({required String preset, String? caption}) async {
+  /// レイアウトプリセットを変える。
+  ///
+  /// [perSlide] のときは表示中のスライドだけ。無いときは 1 枚目の型と、それを共有しているスライド。
+  Future<void> pickLayout({
+    required String preset,
+    String? caption,
+    String? slideId,
+    bool perSlide = false,
+  }) async {
+    final target = perSlide ? (slideId ?? _firstSlideId()) : null;
+    if (perSlide && (target == null || target.isEmpty)) {
+      _state.setError('スライドが選ばれていません');
+      return;
+    }
     final projectPath = _state.projectPath!;
     final python = _requirePython(_state.projectDirectory!);
     _state.setBusy(true, status: '型を更新しています');
@@ -129,6 +193,7 @@ class ReportService {
         projectPath,
         '--preset',
         preset,
+        if (target != null) ...['--slide', target],
         if (caption != null) ...['--caption', caption],
         '--layout',
         _state.layoutPath!,
@@ -136,7 +201,12 @@ class ReportService {
         _state.pptxPath!,
       ]);
       _throwOnError(res, '型の変更に失敗しました');
-      _state.setPreset(preset);
+      if (target != null) {
+        _state.setSlidePreset(target, preset);
+        _state.selectSlide(target);
+      } else {
+        _state.setPreset(preset);
+      }
       await _refresh();
       _state.setStatus('型を更新しました');
     } catch (exc) {
@@ -220,7 +290,7 @@ class ReportService {
         materialized.add({
           'path': path,
           'source': image.filePath != null ? 'folder' : 'task-file',
-          'listIndex': startIndex + index,
+          'listIndex': image.listIndex ?? (startIndex + index),
           'listName': image.listName,
           'listComment': image.listComment,
           'group': image.group,
@@ -231,7 +301,9 @@ class ReportService {
       }
       final tempDir = await _ensureTempDirectory();
       final stamp = DateTime.now().millisecondsSinceEpoch;
-      final recordsFile = File('${tempDir.path}${Platform.pathSeparator}records_$stamp.json');
+      final recordsFile = File(
+        '${tempDir.path}${Platform.pathSeparator}records_$stamp.json',
+      );
       await recordsFile.writeAsString(jsonEncode(materialized));
       final res = await reportSession.run(python, [
         'register-source',
@@ -286,7 +358,8 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       heading: (frameId, text),
     );
   }
@@ -297,7 +370,8 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       headingPlace: (frameId, place),
     );
   }
@@ -316,13 +390,21 @@ class ReportService {
     );
   }
 
+  Future<void> setCaptionHeight(double height, {String? slideId}) async {
+    await editSlide(
+      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      captionHeight: height,
+    );
+  }
+
   Future<void> setHeadingSize({
     required String frameId,
     required double size,
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       headingSize: (frameId, size),
     );
   }
@@ -333,14 +415,16 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       textSize: (textId, size),
     );
   }
 
   Future<void> addFreeText({String text = 'テキスト', String? slideId}) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       addText: true,
       newText: text,
     );
@@ -355,14 +439,16 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       textBox: (textId, x, y, width, height),
     );
   }
 
   Future<void> deleteFreeText({required String textId, String? slideId}) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       removeText: textId,
     );
     _state.selectFrame(null);
@@ -374,7 +460,8 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       textBody: (textId, text),
     );
   }
@@ -424,6 +511,7 @@ class ReportService {
         _state.pptxPath!,
       ]);
       _throwOnError(res, '展開に失敗しました');
+      _state.clearSlidePresets();
       await _refresh();
       _state.setStep(WorkflowStep.expand);
       _state.selectSlide(_firstSlideId());
@@ -474,12 +562,14 @@ class ReportService {
     String? unbind,
     (String frameId, String role)? role,
     (String zoomFrameId, String sourceFrameId)? zoomFrom,
-    (String zoomFrameId, double x, double y, double width, double height)? zoomRect,
+    (String zoomFrameId, double x, double y, double width, double height)?
+    zoomRect,
     (String frameId, String text)? heading,
     (String frameId, String place)? headingPlace,
     (String frameId, double size)? headingSize,
     String? captionPlace,
     bool? captionShown,
+    double? captionHeight,
     (String textId, double size)? textSize,
     bool addText = false,
     String? newText,
@@ -503,31 +593,48 @@ class ReportService {
         if (unbind != null) ...['--unbind', unbind],
         if (role != null) ...['--role', role.$1, role.$2],
         if (zoomFrom != null) ...['--zoom-from', zoomFrom.$1, zoomFrom.$2],
-        if (zoomRect != null)
-          ...[
-            '--zoom-rect',
-            zoomRect.$1,
-            zoomRect.$2.toStringAsFixed(6),
-            zoomRect.$3.toStringAsFixed(6),
-            zoomRect.$4.toStringAsFixed(6),
-            zoomRect.$5.toStringAsFixed(6),
-          ],
+        if (zoomRect != null) ...[
+          '--zoom-rect',
+          zoomRect.$1,
+          zoomRect.$2.toStringAsFixed(6),
+          zoomRect.$3.toStringAsFixed(6),
+          zoomRect.$4.toStringAsFixed(6),
+          zoomRect.$5.toStringAsFixed(6),
+        ],
         if (heading != null) ...['--heading', heading.$1, heading.$2],
-        if (headingPlace != null) ...['--heading-place', headingPlace.$1, headingPlace.$2],
-        if (headingSize != null) ...['--heading-size', headingSize.$1, headingSize.$2.round().toString()],
+        if (headingPlace != null) ...[
+          '--heading-place',
+          headingPlace.$1,
+          headingPlace.$2,
+        ],
+        if (headingSize != null) ...[
+          '--heading-size',
+          headingSize.$1,
+          headingSize.$2.round().toString(),
+        ],
         if (captionPlace != null) ...['--caption-place', captionPlace],
-        if (captionShown != null) ...['--caption-use', captionShown ? 'on' : 'off'],
-        if (textSize != null) ...['--text-size', textSize.$1, textSize.$2.round().toString()],
+        if (captionShown != null) ...[
+          '--caption-use',
+          captionShown ? 'on' : 'off',
+        ],
+        if (captionHeight != null) ...[
+          '--caption-height',
+          captionHeight.toStringAsFixed(1),
+        ],
+        if (textSize != null) ...[
+          '--text-size',
+          textSize.$1,
+          textSize.$2.round().toString(),
+        ],
         if (addText) ...['--add-text', '--text', newText ?? 'テキスト'],
-        if (textBox != null)
-          ...[
-            '--text-box',
-            textBox.$1,
-            textBox.$2.toStringAsFixed(2),
-            textBox.$3.toStringAsFixed(2),
-            textBox.$4.toStringAsFixed(2),
-            textBox.$5.toStringAsFixed(2),
-          ],
+        if (textBox != null) ...[
+          '--text-box',
+          textBox.$1,
+          textBox.$2.toStringAsFixed(2),
+          textBox.$3.toStringAsFixed(2),
+          textBox.$4.toStringAsFixed(2),
+          textBox.$5.toStringAsFixed(2),
+        ],
         if (textBody != null) ...['--text-body', textBody.$1, textBody.$2],
         if (removeText != null) ...['--remove-text', removeText],
         '--layout',
@@ -536,6 +643,43 @@ class ReportService {
         _state.pptxPath!,
       ]);
       _throwOnError(res, 'スライドの更新に失敗しました');
+      await _refresh();
+    } catch (exc) {
+      _state.setError(exc.toString());
+    } finally {
+      _state.setBusy(false);
+    }
+  }
+
+  /// 画像を、親の並びの中の 0〜1 の矩形へ合わせる。
+  Future<void> resizeFrame({
+    required String frameId,
+    required double x,
+    required double y,
+    required double width,
+    required double height,
+    String? slideId,
+  }) async {
+    if (!_state.hasOpenProject) return;
+    final projectPath = _state.projectPath!;
+    final python = _requirePython(_state.projectDirectory!);
+    _state.setBusy(true, status: '画像の大きさを更新しています');
+    try {
+      final res = await reportSession.run(python, [
+        'resize-frame',
+        projectPath,
+        frameId,
+        x.toStringAsFixed(6),
+        y.toStringAsFixed(6),
+        width.toStringAsFixed(6),
+        height.toStringAsFixed(6),
+        if (slideId != null && slideId.isNotEmpty) ...['--slide', slideId],
+        '--layout',
+        _state.layoutPath!,
+        '--pptx',
+        _state.pptxPath!,
+      ]);
+      _throwOnError(res, '画像の大きさの変更に失敗しました');
       await _refresh();
     } catch (exc) {
       _state.setError(exc.toString());
@@ -554,7 +698,8 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       zoomRect: (zoomFrameId, x, y, width, height),
     );
   }
@@ -566,7 +711,8 @@ class ReportService {
     String? slideId,
   }) async {
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       zoomFrom: (zoomFrameId, sourceFrameId),
     );
   }
@@ -617,7 +763,8 @@ class ReportService {
       return;
     }
     await editSlide(
-      slideId: slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
+      slideId:
+          slideId ?? _state.selectedSlideId ?? _firstSlideId() ?? 'slide-1',
       bind: (frameId, assetId),
     );
   }
@@ -634,6 +781,7 @@ class ReportService {
       }
     }
     _state.updateDocuments(layout: layout, projectJson: projectJson);
+    _state.setHistory(canUndo: reportSession.canUndo, canRedo: reportSession.canRedo);
   }
 
   void _throwOnError(ProcessResult res, String fallback) {
@@ -661,7 +809,8 @@ class ReportService {
           return raw['id']?.toString();
         }
       }
-      if (file == name || displayName == name.replaceAll(RegExp(r'\.[^.]+$'), '')) {
+      if (file == name ||
+          displayName == name.replaceAll(RegExp(r'\.[^.]+$'), '')) {
         return raw['id']?.toString();
       }
     }
@@ -741,13 +890,17 @@ class ReportService {
         ? image.name.substring(image.name.lastIndexOf('.'))
         : '.bin';
     final counter = _tempCounter;
-    final target = File('${temp.path}${Platform.pathSeparator}img_$counter$extension');
+    final target = File(
+      '${temp.path}${Platform.pathSeparator}img_$counter$extension',
+    );
     await target.writeAsBytes(bytes);
     return target.path;
   }
 
   String _requirePython(String directory) {
-    final python = pythonExecutableNearLayout('$directory${Platform.pathSeparator}layout.json');
+    final python = pythonExecutableNearLayout(
+      '$directory${Platform.pathSeparator}layout.json',
+    );
     if (python == null) {
       throw const FormatException('Python 仮想環境が見つかりません。.venv を作ってください');
     }

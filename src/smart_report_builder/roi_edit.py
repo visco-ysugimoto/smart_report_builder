@@ -1295,6 +1295,9 @@ def layouts_for_pptx(project: Project, active: object) -> list:
                     assets=project.assets,
                     slide=item.slide,
                     datasets=project.datasets,
+                    layouts=project.layouts,
+                    report_slides=project.report_slides,
+                    active_slide_id=item.id,
                     schema_version=project.schema_version,
                 )
             )
@@ -1753,7 +1756,7 @@ def restore_last_roi_edit(project_path: str | Path) -> Project:
     destination = Path(project_path)
     history = _load_history(destination)
     if not history["undo"]:
-        raise ValueError("戻せる ROI 操作がありません")
+        raise ValueError("戻せる操作がありません")
     current = destination.read_bytes() if destination.is_file() else b""
     previous = _decode(history["undo"].pop())
     load_project_bytes = previous
@@ -1771,7 +1774,7 @@ def restore_redone_roi_edit(project_path: str | Path) -> Project:
     destination = Path(project_path)
     history = _load_history(destination)
     if not history["redo"]:
-        raise ValueError("やり直せる ROI 操作がありません")
+        raise ValueError("やり直せる操作がありません")
     current = destination.read_bytes() if destination.is_file() else b""
     nxt = _decode(history["redo"].pop())
     _validate_project_bytes(nxt)
@@ -2477,11 +2480,16 @@ def _resize_frame_command(argv: list[str]) -> int:
     parser.add_argument("y", type=float)
     parser.add_argument("width", type=float)
     parser.add_argument("height", type=float)
+    parser.add_argument("--slide", help="このスライドだけ大きさを変える")
     parser.add_argument("--layout")
     parser.add_argument("--pptx")
     args = parser.parse_args(argv)
     try:
         project = load_project(args.project)
+        if args.slide:
+            from smart_report_builder.cli.pick_layout import _prepare_one_slide
+
+            _prepare_one_slide(project, args.slide)
         frame_id = set_image_frame_rect(
             project,
             args.element_id,

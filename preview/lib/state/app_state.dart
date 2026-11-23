@@ -22,6 +22,8 @@ class AppState extends ChangeNotifier {
   LayoutResult? _result;
   String? _projectJson;
   bool _busy = false;
+  bool _canUndo = false;
+  bool _canRedo = false;
   String? _statusMessage;
   String? _errorMessage;
   final List<LibrarySource> _librarySources = [];
@@ -32,6 +34,7 @@ class AppState extends ChangeNotifier {
   String _titleTemplate = '';
   String _captionTemplate = '';
   String _currentPreset = 'horizontal-2';
+  final Map<String, String> _slidePresets = {};
 
   WorkflowStep get step => _step;
   String? get projectDirectory => _projectDirectory;
@@ -41,6 +44,8 @@ class AppState extends ChangeNotifier {
   LayoutResult? get result => _result;
   String? get projectJson => _projectJson;
   bool get busy => _busy;
+  bool get canUndo => _canUndo;
+  bool get canRedo => _canRedo;
   String? get statusMessage => _statusMessage;
   String? get errorMessage => _errorMessage;
   List<LibrarySource> get librarySources => List.unmodifiable(_librarySources);
@@ -51,6 +56,12 @@ class AppState extends ChangeNotifier {
   String get titleTemplate => _titleTemplate;
   String get captionTemplate => _captionTemplate;
   String get currentPreset => _currentPreset;
+
+  /// 展開後にそのスライドだけ変えた並び。未設定なら 1 枚目の型に従う。
+  String? slidePreset(String? slideId) {
+    if (slideId == null) return null;
+    return _slidePresets[slideId];
+  }
 
   bool get hasOpenProject => _projectPath != null && _result != null;
 
@@ -71,11 +82,11 @@ class AppState extends ChangeNotifier {
       _librarySources.fold(0, (sum, source) => sum + source.imageCount);
 
   List<LibraryImage> get includedLibraryImages => [
-        for (final source in _librarySources)
-          for (final group in source.groups)
-            for (final image in group.images)
-              if (image.included) image,
-      ];
+    for (final source in _librarySources)
+      for (final group in source.groups)
+        for (final image in group.images)
+          if (image.included) image,
+  ];
 
   void setStep(WorkflowStep step) {
     if (_step == step) return;
@@ -156,6 +167,13 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  void setHistory({required bool canUndo, required bool canRedo}) {
+    if (_canUndo == canUndo && _canRedo == canRedo) return;
+    _canUndo = canUndo;
+    _canRedo = canRedo;
+    notifyListeners();
+  }
+
   void closeProject() {
     _projectDirectory = null;
     _projectPath = null;
@@ -167,6 +185,8 @@ class AppState extends ChangeNotifier {
     _selectedFrameId = null;
     _selectedSlideId = null;
     _slideCount = 1;
+    _canUndo = false;
+    _canRedo = false;
     notifyListeners();
   }
 
@@ -176,10 +196,367 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// コメント分類へ画像を足す。同じパスは足さない。追加した枚数を返す。
+  int appendLibraryImages({
+    required String sourceId,
+    required String groupId,
+    required List<String> paths,
+  }) {
+    final index = _librarySources.indexWhere((source) => source.id == sourceId);
+    if (index < 0 || paths.isEmpty) return 0;
+    final source = _librarySources[index];
+    final group = source.groups.where((item) => item.id == groupId);
+    if (group.isEmpty) return 0;
+    final images = imagesForGroup(
+      sourceId: sourceId,
+      group: group.first,
+      paths: paths,
+      existingPaths: libraryPathsIn(source),
+    );
+    if (images.isEmpty) return 0;
+    _librarySources[index] = LibrarySource(
+      id: source.id,
+      kind: source.kind,
+      label: source.label,
+      origin: source.origin,
+      zipCatalog: source.zipCatalog,
+      truncated: source.truncated,
+      groups: [
+        for (final item in source.groups)
+          if (item.id != groupId)
+            item
+          else
+            LibraryGroup(
+              id: item.id,
+              label: item.label,
+              images: [...item.images, ...images],
+            ),
+      ],
+    );
+    notifyListeners();
+    return images.length;
+  }
+
+  /// 分類を足す。同じ名前があるときや空のときは、その理由を返す。
+  String? addLibraryGroup({required String sourceId, required String name}) {
+    final label = name.trim();
+    if (label.isEmpty) return '分類名を入力してください';
+    final index = _librarySources.indexWhere((item) => item.id == sourceId);
+    if (index < 0) return '画像の一覧が見つかりません';
+    final source = _librarySources[index];
+    if (source.groups.any((group) => _sameClassification(group, label))) {
+      return '同じ名前の分類があります';
+    }
+    final group = LibraryGroup(
+      id: _freshGroupId(source, label),
+      label: label,
+      images: const [],
+    );
+    final groups = [...source.groups];
+    final otherAt = groups.indexWhere(isCatchAllGroup);
+    if (otherAt < 0) {
+      groups.add(group);
+    } else {
+      groups.insert(otherAt, group);
+    }
+    _librarySources[index] = _copySource(source, groups);
+    notifyListeners();
+    return null;
+  }
+
+  /// 分類を外す。中の画像は「その他」へ移し、移した枚数を返す。その他自体は外せない。
+  int removeLibraryGroup({required String sourceId, required String groupId}) {
+    final index = _librarySources.indexWhere((item) => item.id == sourceId);
+    if (index < 0) return -1;
+    final source = _librarySources[index];
+    final targets = source.groups.where((group) => group.id == groupId);
+    if (targets.isEmpty || isCatchAllGroup(targets.first)) return -1;
+    final removed = targets.first;
+    final displaced = [
+      for (final image in removed.images) image.copyWith(clearComment: true),
+    ];
+    final groups = [
+      for (final group in source.groups)
+        if (group.id != groupId) group,
+    ];
+    if (displaced.isNotEmpty) {
+      final otherAt = groups.indexWhere(isCatchAllGroup);
+      if (otherAt < 0) {
+        groups.add(
+          LibraryGroup(
+            id: _freshGroupId(source, 'その他'),
+            label: _catchAllLabel(source),
+            images: _numbered(displaced),
+          ),
+        );
+      } else {
+        final other = groups[otherAt];
+        groups[otherAt] = LibraryGroup(
+          id: other.id,
+          label: other.label,
+          images: _numbered([...other.images, ...displaced]),
+        );
+      }
+    }
+    if (groups.isEmpty) {
+      _librarySources.removeAt(index);
+    } else {
+      _librarySources[index] = _copySource(source, groups);
+    }
+    notifyListeners();
+    return displaced.length;
+  }
+
+  /// ファイル名ごとの分類結果で、同じソースの画像を振り直す。移した枚数を返す。
+  int reclassifyLibrary({
+    required String sourceId,
+    required Map<String, String> categoryByName,
+  }) {
+    final index = _librarySources.indexWhere((item) => item.id == sourceId);
+    if (index < 0 || categoryByName.isEmpty) return 0;
+    final source = _librarySources[index];
+    final wanted = <String, String>{};
+    for (final entry in categoryByName.entries) {
+      final name = entry.key.trim().toLowerCase();
+      final category = entry.value.trim();
+      if (name.isEmpty || category.isEmpty) continue;
+      wanted[name] = category;
+    }
+    if (wanted.isEmpty) return 0;
+    final shells = <LibraryGroup>[
+      for (final group in source.groups)
+        LibraryGroup(id: group.id, label: group.label, images: const []),
+    ];
+    final staying = <String, List<LibraryImage>>{
+      for (final group in shells) group.id: <LibraryImage>[],
+    };
+    final incoming = <String, List<LibraryImage>>{};
+    var moved = 0;
+    for (final group in source.groups) {
+      for (final image in group.images) {
+        final category = wanted[image.name.trim().toLowerCase()];
+        final target = category == null
+            ? group
+            : _ensureClassification(source, shells, incoming, category);
+        final comment = isCatchAllGroup(target)
+            ? null
+            : (commentToken(target) ?? target.label);
+        final next = image.copyWith(listComment: comment, clearComment: comment == null);
+        if (target.id == group.id) {
+          staying.putIfAbsent(target.id, () => []).add(next);
+        } else {
+          moved += 1;
+          incoming.putIfAbsent(target.id, () => []).add(next);
+        }
+      }
+    }
+    if (moved == 0) return 0;
+    _librarySources[index] = _copySource(source, [
+      for (final group in shells)
+        LibraryGroup(
+          id: group.id,
+          label: group.label,
+          images: _numbered([
+            ...staying[group.id] ?? const [],
+            ...incoming[group.id] ?? const [],
+          ]),
+        ),
+    ]);
+    notifyListeners();
+    return moved;
+  }
+
+  LibraryGroup _ensureClassification(
+    LibrarySource source,
+    List<LibraryGroup> shells,
+    Map<String, List<LibraryImage>> incoming,
+    String category,
+  ) {
+    final catchAll = category == 'その他';
+    if (catchAll) {
+      for (final group in shells) {
+        if (isCatchAllGroup(group)) return group;
+      }
+    } else {
+      for (final group in shells) {
+        if (_sameClassification(group, category)) return group;
+      }
+    }
+    final label = catchAll ? _catchAllLabel(source) : category;
+    final created = LibraryGroup(
+      id: _freshGroupId(
+        LibrarySource(
+          id: source.id,
+          kind: source.kind,
+          label: source.label,
+          origin: source.origin,
+          groups: shells,
+        ),
+        catchAll ? 'その他' : category,
+      ),
+      label: label,
+      images: const [],
+    );
+    if (catchAll) {
+      shells.add(created);
+    } else {
+      final otherAt = shells.indexWhere(isCatchAllGroup);
+      if (otherAt < 0) {
+        shells.add(created);
+      } else {
+        shells.insert(otherAt, created);
+      }
+    }
+    incoming[created.id] = <LibraryImage>[];
+    return created;
+  }
+
+  bool _sameClassification(LibraryGroup group, String label) {
+    if (isCatchAllGroup(group) && label == 'その他') return true;
+    final token = commentToken(group);
+    final existing = (token ?? group.label).trim().toLowerCase();
+    return existing == label.toLowerCase();
+  }
+
+  String _freshGroupId(LibrarySource source, String label) {
+    final slug = label.toLowerCase().replaceAll(RegExp(r'\s+'), '-');
+    final base = label == 'その他' ? '${source.id}:other' : '${source.id}:$slug';
+    if (!source.groups.any((group) => group.id == base)) return base;
+    var number = 2;
+    while (source.groups.any((group) => group.id == '$base:$number')) {
+      number += 1;
+    }
+    return '$base:$number';
+  }
+
+  String _catchAllLabel(LibrarySource source) {
+    for (final group in source.groups) {
+      final at = group.label.lastIndexOf(' / ');
+      if (at > 0) return '${group.label.substring(0, at)} / その他';
+    }
+    return 'その他';
+  }
+
+  LibrarySource _copySource(LibrarySource source, List<LibraryGroup> groups) {
+    return LibrarySource(
+      id: source.id,
+      kind: source.kind,
+      label: source.label,
+      origin: source.origin,
+      zipCatalog: source.zipCatalog,
+      truncated: source.truncated,
+      groups: groups,
+    );
+  }
+
+  /// 同じソースの別の分類へ画像を移す。移した画像は先の分類の末尾になり、番号は並び直す。
+  void moveLibraryImage({
+    required String imageId,
+    required String sourceId,
+    required String groupId,
+  }) {
+    final index = _librarySources.indexWhere((item) => item.id == sourceId);
+    if (index < 0) return;
+    final source = _librarySources[index];
+    LibraryGroup? origin;
+    LibraryImage? image;
+    for (final group in source.groups) {
+      for (final item in group.images) {
+        if (item.id == imageId) {
+          origin = group;
+          image = item;
+        }
+      }
+    }
+    if (image == null || origin == null || origin.id == groupId) return;
+    final targets = source.groups.where((group) => group.id == groupId);
+    if (targets.isEmpty) return;
+    final comment = _commentForGroup(targets.first);
+    final moved = image.copyWith(listComment: comment, clearComment: comment == null);
+    _librarySources[index] = LibrarySource(
+      id: source.id,
+      kind: source.kind,
+      label: source.label,
+      origin: source.origin,
+      zipCatalog: source.zipCatalog,
+      truncated: source.truncated,
+      groups: [
+        for (final group in source.groups)
+          LibraryGroup(
+            id: group.id,
+            label: group.label,
+            images: _numbered(
+              group.id == groupId
+                  ? [...group.images, moved]
+                  : [
+                      for (final item in group.images)
+                        if (item.id != imageId) item,
+                    ],
+            ),
+          ),
+      ],
+    );
+    notifyListeners();
+  }
+
+  String? _commentForGroup(LibraryGroup group) {
+    final token = commentToken(group);
+    if (token != null) return token;
+    final label = group.label.trim();
+    if (label.isEmpty || label == 'その他') return null;
+    return label;
+  }
+
+  List<LibraryImage> _numbered(List<LibraryImage> images) {
+    return [
+      for (var index = 0; index < images.length; index++)
+        images[index].copyWith(listIndex: index + 1),
+    ];
+  }
+
+  /// 一覧から画像を 1 枚外す。コメント分類は空でも残し、それ以外は空になったソースを外す。
+  void removeLibraryImage(String imageId) {
+    for (var index = 0; index < _librarySources.length; index++) {
+      final source = _librarySources[index];
+      final keepEmpty = sourceGroupsByComment(source);
+      final nextGroups = <LibraryGroup>[];
+      var removed = false;
+      for (final group in source.groups) {
+        final images = [
+          for (final image in group.images)
+            if (image.id != imageId) image,
+        ];
+        if (images.length != group.images.length) removed = true;
+        if (images.isEmpty && !keepEmpty) continue;
+        nextGroups.add(
+          LibraryGroup(id: group.id, label: group.label, images: images),
+        );
+      }
+      if (!removed) continue;
+      if (nextGroups.isEmpty) {
+        _librarySources.removeAt(index);
+      } else {
+        _librarySources[index] = LibrarySource(
+          id: source.id,
+          kind: source.kind,
+          label: source.label,
+          origin: source.origin,
+          zipCatalog: source.zipCatalog,
+          truncated: source.truncated,
+          groups: nextGroups,
+        );
+      }
+      if (_selectedLibraryImageId == imageId) {
+        _selectedLibraryImageId = null;
+      }
+      notifyListeners();
+      return;
+    }
+  }
+
   void removeLibrarySource(String id) {
     _librarySources.removeWhere((source) => source.id == id);
-    if (_selectedLibraryImageId != null &&
-        selectedLibraryImage == null) {
+    if (_selectedLibraryImageId != null && selectedLibraryImage == null) {
       _selectedLibraryImageId = null;
     }
     notifyListeners();
@@ -272,6 +649,17 @@ class AppState extends ChangeNotifier {
 
   void setPreset(String preset) {
     _currentPreset = preset;
+    notifyListeners();
+  }
+
+  void setSlidePreset(String slideId, String preset) {
+    _slidePresets[slideId] = preset;
+    notifyListeners();
+  }
+
+  void clearSlidePresets() {
+    if (_slidePresets.isEmpty) return;
+    _slidePresets.clear();
     notifyListeners();
   }
 

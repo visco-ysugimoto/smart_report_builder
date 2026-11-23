@@ -47,14 +47,24 @@ def _expand_in_tray_order(project, *, range_to: int | None, overwrite_labels: bo
     VTV のタスクは txt ごとに別リストになる。リストの「1番目」だけを見ると、
     配置した画像が競合扱いになって1枚も載らない。
     """
-    frames = _contain_frames(project.content_master.root)
-    if not frames:
-        raise ValueError("通常表示の画像枠がありません")
     assets = list(project.assets)
     if not assets:
         raise ValueError("展開する画像がありません")
+    if not project.report_slides:
+        roi_edit._ensure_deck(project)
+    layout = next(
+        (item for item in project.layouts if item.id == project.report_slides[0].layout_id),
+        None,
+    )
+    if layout is None:
+        raise ValueError("レイアウトが見つからない")
+    # 再展開は 1 枚目の型に戻す。展開後に 1 枚だけ変えた並びはここで揃える。
+    _align_slides_to_layout(project, layout)
+    frames = _contain_frames(layout.content_master.root)
+    if not frames:
+        raise ValueError("通常表示の画像枠がありません")
     order = {asset.id: index for index, asset in enumerate(assets)}
-    preserved, last_used = _preserved_first_slide(project.slide, frames, order)
+    preserved, last_used = _preserved_first_slide(project.report_slides[0].slide, frames, order)
     tail = assets[last_used + 1 :]
     per_slide = len(frames)
     empty_on_first = sum(1 for frame in frames if frame.id not in preserved)
@@ -64,14 +74,6 @@ def _expand_in_tray_order(project, *, range_to: int | None, overwrite_labels: bo
         raise ValueError("展開する画像がありません")
     if range_to is not None:
         needed = max(1, min(needed, range_to))
-    if not project.report_slides:
-        roi_edit._ensure_deck(project)
-    layout = next(
-        (item for item in project.layouts if item.id == project.report_slides[0].layout_id),
-        None,
-    )
-    if layout is None:
-        raise ValueError("レイアウトが見つからない")
     while len(project.report_slides) < needed:
         roi_edit._append_slide(project, layout)
     if len(project.report_slides) > needed:
@@ -116,8 +118,10 @@ def _expand_in_tray_order(project, *, range_to: int | None, overwrite_labels: bo
                 ordinal + 1,
                 caption_id,
                 overwrite_labels=overwrite_labels,
+                assets=project.assets,
             )
     _copy_zoom_regions(project)
+    _copy_frame_headings(project, _zoom_frames(layout.content_master.root))
     first = project.report_slides[0]
     project.active_slide_id = first.id
     project.slide = first.slide
@@ -125,8 +129,46 @@ def _expand_in_tray_order(project, *, range_to: int | None, overwrite_labels: bo
     return applied
 
 
+def _align_slides_to_layout(project, layout) -> None:
+    """全スライドを 1 枚目の型へ戻す。もともと別の型だったスライドの拡大範囲は外す。"""
+    for report in project.report_slides:
+        if report.layout_id != layout.id:
+            report.layout_id = layout.id
+            report.slide.content_master_id = layout.content_master.id
+            report.slide.rois = []
+        elif report.slide.content_master_id != layout.content_master.id:
+            report.slide.content_master_id = layout.content_master.id
+    project.layouts = [layout]
+    project.content_master = layout.content_master
+
+
+def _copy_frame_headings(project, frames) -> None:
+    """拡大画像などの見出しを、個別に変えていない後続スライドへ写す。"""
+    frame_ids = {frame.id for frame in frames}
+    slides = project.report_slides
+    if not frame_ids or len(slides) < 2:
+        return
+    master = _heading_snapshot(slides[0].slide, frame_ids)
+    for report in slides[1:]:
+        prior = _heading_snapshot(report.slide, frame_ids)
+        report.slide.bindings = [
+            item for item in report.slide.bindings if item.element_id not in frame_ids
+        ]
+        for frame_id in frame_ids:
+            previous = prior.get(frame_id)
+            template = master.get(frame_id)
+            if previous is None and template is None:
+                continue
+            asset_id = previous.asset_id if previous is not None and previous.asset_id else None
+            if asset_id is None and template is not None:
+                asset_id = template.asset_id
+            report.slide.bindings.append(
+                _binding_with_heading(frame_id, asset_id, previous, template)
+            )
+
+
 def _copy_zoom_regions(project) -> None:
-    """1枚目で決めた拡大範囲を、同じ枠を使う後続スライドへコピーする。"""
+    """1枚目で決めた拡大範囲を、個別に動かしていない後続スライドへコピーする。"""
     import copy
 
     slides = project.report_slides
@@ -134,27 +176,36 @@ def _copy_zoom_regions(project) -> None:
         return
     template = slides[0].slide.rois
     for index, report in enumerate(slides[1:], start=2):
-        # 展開後に動かした範囲は、再展開してもそのスライドの位置を残す。
-        if report.slide.rois:
+        if any(roi.custom for roi in report.slide.rois):
             continue
         cloned = []
         for roi in template:
             item = copy.copy(roi)
             item.id = f"{roi.id}-s{index}"
+            item.custom = False
             cloned.append(item)
         report.slide.rois = cloned
 
 
-def _apply_templates(slide, rule, chunk, slide_number: int, caption_id: str | None, *, overwrite_labels: bool) -> None:
+def _apply_templates(
+    slide,
+    rule,
+    chunk,
+    slide_number: int,
+    caption_id: str | None,
+    *,
+    overwrite_labels: bool,
+    assets,
+) -> None:
     numbered = {index: asset for index, asset in enumerate(chunk)}
     if rule.title_template and (overwrite_labels or not slide.title.strip()):
-        slide.title = render_label(rule.title_template, numbered, slide_number).text
+        slide.title = render_label(rule.title_template, numbered, slide_number, assets=assets).text
     if caption_id is None:
         return
     template = next((item.template for item in rule.text_templates if item.element_id == caption_id), "")
     if not template:
         return
-    text = render_label(template, numbered, slide_number).text
+    text = render_label(template, numbered, slide_number, assets=assets).text
     existing = [item for item in slide.bindings if item.element_id == caption_id]
     if existing and not overwrite_labels and (existing[0].text or "").strip():
         return
@@ -168,15 +219,22 @@ def _heading_snapshot(slide, frame_ids: set[str]) -> dict[str, Binding]:
     return {item.element_id: item for item in slide.bindings if item.element_id in frame_ids}
 
 
-def _binding_with_heading(frame_id: str, asset_id: str, previous: Binding | None, master: Binding | None) -> Binding:
-    """画像を割り当て直しても、その枠の見出しは残す。見出しが無いスライドは 1 枚目に合わせる。"""
-    source = previous if previous is not None else master
+def _binding_with_heading(
+    frame_id: str,
+    asset_id: str | None,
+    previous: Binding | None,
+    master: Binding | None,
+) -> Binding:
+    """見出しは 1 枚目に合わせる。そのスライドだけ変えた見出しは残す。"""
+    locked = previous is not None and previous.heading_locked
+    source = previous if locked else master if master is not None else previous
     return Binding(
         element_id=frame_id,
         asset_id=asset_id,
         text=None if source is None else source.text,
         text_anchor=None if source is None else source.text_anchor,
         font_pt=None if source is None else source.font_pt,
+        heading_locked=locked,
     )
 
 
@@ -208,6 +266,20 @@ def _caption_id(node) -> str | None:
         if found:
             return found
     return None
+
+
+def _zoom_frames(node) -> list[ImageFrameNode]:
+    found: list[ImageFrameNode] = []
+
+    def walk(current) -> None:
+        if isinstance(current, ImageFrameNode) and current.fit_mode == FitMode.ROI:
+            found.append(current)
+            return
+        for child in getattr(current, "children", []) or []:
+            walk(child)
+
+    walk(node)
+    return found
 
 
 def _contain_frames(node) -> list[ImageFrameNode]:

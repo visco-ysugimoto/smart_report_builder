@@ -140,6 +140,8 @@ class EditSession:
             "stdout": stdout,
             "stderr": stderr,
             "dirty": self.dirty(),
+            "canUndo": bool(self.undo),
+            "canRedo": bool(self.redo),
             "project": self._project_payload(),
             "layout": self._layout_payload(),
         }
@@ -160,7 +162,7 @@ class EditSession:
             return self._error("プロジェクトを開いていません")
         if operation == "undo":
             if not self.undo:
-                return self._error("戻せる ROI 操作がありません")
+                return self._error("戻せる操作がありません")
             current = self._token()
             previous = self.undo.pop()
             self.redo.append(current)
@@ -169,7 +171,7 @@ class EditSession:
             label = "undone\n"
         else:
             if not self.redo:
-                return self._error("やり直せる ROI 操作がありません")
+                return self._error("やり直せる操作がありません")
             current = self._token()
             nxt = self.redo.pop()
             self.undo.append(current)

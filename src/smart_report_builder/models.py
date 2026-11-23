@@ -251,6 +251,8 @@ class Binding:
     text_anchor: str | None = None
     # 見出しの文字サイズ（pt）。未指定は 14。
     font_pt: float | None = None
+    # 展開後にそのスライドだけ見出しを変えた印。True のとき再展開でも 1 枚目で上書きしない。
+    heading_locked: bool = False
 
 
 @dataclass
@@ -279,6 +281,8 @@ class Roi:
     dy: float = 0.0
     dw: float = 0.0
     dh: float = 0.0
+    # 展開後にそのスライドだけ拡大範囲を変えた印。
+    custom: bool = False
 
 
 @dataclass
@@ -387,6 +391,8 @@ class PlacedElement:
     text_anchor: str | None = None
     label_frame: Rect | None = None
     font_pt: float | None = None
+    # 見出しの差し込みを展開した表示用の文字。text は入力したテンプレートのまま。
+    rendered_text: str | None = None
 
 
 @dataclass(frozen=True)
@@ -530,6 +536,8 @@ def _placed_to_dict(element: PlacedElement) -> dict[str, Any]:
         payload["labelFrame"] = element.label_frame.to_dict()
     if element.font_pt is not None:
         payload["fontPt"] = element.font_pt
+    if element.rendered_text is not None:
+        payload["renderedText"] = element.rendered_text
     return payload
 
 
@@ -561,6 +569,7 @@ def _placed_from_dict(data: dict[str, Any]) -> PlacedElement:
         text_anchor=None if data.get("textAnchor") not in {"above", "below"} else str(data["textAnchor"]),
         label_frame=None if data.get("labelFrame") is None else Rect.from_dict(data["labelFrame"]),
         font_pt=None if data.get("fontPt") is None else float(data["fontPt"]),
+        rendered_text=None if data.get("renderedText") is None else str(data["renderedText"]),
     )
 
 
@@ -808,6 +817,8 @@ def _binding_to_dict(binding: Binding) -> dict[str, Any]:
         payload["headingPlace"] = binding.text_anchor
     if binding.font_pt is not None:
         payload["headingSize"] = binding.font_pt
+    if binding.heading_locked:
+        payload["headingLocked"] = True
     return payload
 
 
@@ -838,6 +849,7 @@ def _slide_from_dict(data: dict[str, Any]) -> SlideInstance:
                 if item.get("headingPlace") not in {"above", "below"}
                 else str(item["headingPlace"]),
                 font_pt=None if item.get("headingSize") is None else float(item["headingSize"]),
+                heading_locked=item.get("headingLocked") is True,
             )
         )
     rois: list[Roi] = []
@@ -870,6 +882,8 @@ def _roi_to_dict(roi: Roi) -> dict[str, Any]:
         payload["noteDy"] = roi.note_dy
     if roi.master_roi_id is not None:
         payload["masterRoiId"] = roi.master_roi_id
+    if roi.custom:
+        payload["custom"] = True
     if roi.inheritance != Inheritance.DETACHED:
         payload["inheritance"] = roi.inheritance.value
         payload["dx"] = roi.dx
@@ -900,6 +914,7 @@ def _roi_from_dict(data: dict[str, Any]) -> Roi:
         dy=float(data.get("dy", 0.0)),
         dw=float(data.get("dw", 0.0)),
         dh=float(data.get("dh", 0.0)),
+        custom=data.get("custom") is True,
     )
 
 
@@ -998,7 +1013,8 @@ def _element_to_dict(element: Element) -> dict[str, Any]:
             payload["place"] = "before"
         if not element.shown:
             payload["shown"] = False
-        if element.font_pt != 16:
+        default_font = 12.0 if element.role_id == "caption" else 16.0
+        if element.font_pt != default_font:
             payload["fontPt"] = element.font_pt
         return payload
     if isinstance(element, TableNode):
@@ -1042,16 +1058,18 @@ def _element_from_dict(data: dict[str, Any]) -> Element:
         )
     if kind == "text":
         free = data.get("freeRect")
+        role_id = str(_required(data, "roleId"))
+        default_font = 12.0 if role_id == "caption" else 16.0
         return TextNode(
             id=str(_required(data, "id")),
-            role_id=str(_required(data, "roleId")),
+            role_id=role_id,
             display_name=str(_required(data, "displayName")),
             text=str(_required(data, "text")),
             height_pt=float(_required(data, "heightPt")),
             free_rect=None if free is None else Rect.from_dict(free),
             place="before" if data.get("place") == "before" else "after",
             shown=data.get("shown", True) is not False,
-            font_pt=16.0 if data.get("fontPt") is None else float(data["fontPt"]),
+            font_pt=default_font if data.get("fontPt") is None else float(data["fontPt"]),
         )
     if kind == "table":
         return TableNode(

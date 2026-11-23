@@ -27,7 +27,7 @@ def run(argv: list[str]) -> int:
     try:
         project = roi_edit.load_project(args.project)
         _store(project, title=args.title, caption=args.caption)
-        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=False)
+        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=True)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -88,7 +88,7 @@ def _apply_preview_title(project, title: str) -> None:
         if item.id == project.active_slide_id:
             number = index
             break
-    rendered = render_label(template, numbered, number).text.strip()
+    rendered = render_label(template, numbered, number, assets=project.assets).text.strip()
     project.slide.title = rendered or template
 
 

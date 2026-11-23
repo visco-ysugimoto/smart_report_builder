@@ -42,6 +42,7 @@ def run(argv: list[str]) -> int:
     parser.add_argument("--heading-size", nargs=2, metavar=("FRAME_ID", "PT"))
     parser.add_argument("--caption-place", choices=("above", "below"))
     parser.add_argument("--caption-use", choices=("on", "off"))
+    parser.add_argument("--caption-height", metavar="PT")
     parser.add_argument("--text-size", nargs=2, metavar=("TEXT_ID", "PT"))
     parser.add_argument("--add-text", action="store_true")
     parser.add_argument("--text", default="テキスト")
@@ -87,21 +88,24 @@ def run(argv: list[str]) -> int:
                 width=float(raw_width),
                 height=float(raw_height),
             )
+        later = _is_later_slide(project, slide)
         if args.heading:
             frame_id, text = args.heading
-            _set_binding(slide, frame_id, text=text)
+            _set_binding(slide, frame_id, text=text, lock_heading=later)
         if args.heading_place:
             frame_id, place = args.heading_place
             if place not in {"above", "below"}:
                 raise ValueError("見出しの位置は上か下です")
-            _set_binding(slide, frame_id, text_anchor=place)
+            _set_binding(slide, frame_id, text_anchor=place, lock_heading=later)
         if args.heading_size:
             frame_id, raw_size = args.heading_size
-            _set_binding(slide, frame_id, font_pt=_text_size(raw_size))
+            _set_binding(slide, frame_id, font_pt=_text_size(raw_size), lock_heading=later)
         if args.caption_place:
             _set_caption_place(project, args.caption_place)
         if args.caption_use:
             _set_caption_shown(project, args.caption_use == "on")
+        if args.caption_height is not None:
+            _set_caption_height(project, slide, args.caption_height)
         if args.text_size:
             text_id, raw_size = args.text_size
             _set_text_size(project, text_id, _text_size(raw_size))
@@ -170,6 +174,10 @@ def _caption_element_id(project: Project) -> str | None:
     return walk(project.content_master.root)
 
 
+def _is_later_slide(project: Project, slide: SlideInstance) -> bool:
+    return bool(project.report_slides) and project.report_slides[0].slide is not slide
+
+
 def _set_binding(
     slide: SlideInstance,
     element_id: str,
@@ -178,6 +186,7 @@ def _set_binding(
     text: str | None = None,
     text_anchor: str | None = None,
     font_pt: float | None = None,
+    lock_heading: bool = False,
 ) -> None:
     existing = [b for b in slide.bindings if b.element_id == element_id]
     if not existing:
@@ -188,6 +197,7 @@ def _set_binding(
                 text=text,
                 text_anchor=text_anchor,
                 font_pt=font_pt,
+                heading_locked=lock_heading,
             )
         )
         return
@@ -200,18 +210,20 @@ def _set_binding(
         binding.text_anchor = text_anchor
     if font_pt is not None:
         binding.font_pt = font_pt
+    if lock_heading and (text is not None or text_anchor is not None or font_pt is not None):
+        binding.heading_locked = True
 
 
-_TEXT_SIZES = {12.0, 14.0, 16.0, 18.0, 22.0, 28.0, 36.0}
+_TEXT_SIZES = {9.0, 10.0, 11.0, 12.0, 14.0, 16.0, 18.0, 22.0, 28.0, 36.0}
 
 
 def _text_size(raw: str) -> float:
     try:
         size = float(raw)
     except ValueError as exc:
-        raise ValueError("文字サイズは 12, 14, 16, 18, 22, 28, 36 のいずれかです") from exc
+        raise ValueError("文字サイズは 9, 10, 11, 12, 14, 16, 18, 22, 28, 36 のいずれかです") from exc
     if size not in _TEXT_SIZES:
-        raise ValueError("文字サイズは 12, 14, 16, 18, 22, 28, 36 のいずれかです")
+        raise ValueError("文字サイズは 9, 10, 11, 12, 14, 16, 18, 22, 28, 36 のいずれかです")
     return size
 
 
@@ -227,6 +239,30 @@ def _set_caption_shown(project: Project, shown: bool) -> None:
     if node is None:
         raise ValueError("説明枠がありません")
     node.shown = shown
+
+
+_MIN_CAPTION_HEIGHT = 28.0
+_MAX_CAPTION_HEIGHT = 360.0
+
+
+def _set_caption_height(project: Project, slide: SlideInstance, raw: str) -> None:
+    try:
+        height = float(raw)
+    except ValueError as exc:
+        raise ValueError("説明文の縦幅が数値ではない") from exc
+    node = _find_caption(_layout_root(project, slide))
+    if node is None:
+        raise ValueError("説明枠がありません")
+    node.height_pt = min(max(height, _MIN_CAPTION_HEIGHT), _MAX_CAPTION_HEIGHT)
+
+
+def _layout_root(project: Project, slide: SlideInstance):
+    for item in project.report_slides:
+        if item.slide is slide:
+            layout = next((candidate for candidate in project.layouts if candidate.id == item.layout_id), None)
+            if layout is not None:
+                return layout.content_master.root
+    return project.content_master.root
 
 
 def _set_text_size(project: Project, text_id: str, size: float) -> None:
@@ -276,6 +312,8 @@ def _link_zoom(project: Project, slide: SlideInstance, zoom_id: str, source_id: 
         current.source_element_id = source.id
         current.zoom_element_id = zoom.id
         current.name = f"{source.display_name}の拡大"
+    if _is_later_slide(project, slide):
+        current.custom = True
     slide.rois = [*others, current]
 
 
@@ -299,6 +337,8 @@ def _move_zoom(
     roi.height = _clamp_size(roi.height if height is None else height)
     roi.x = _clamp_origin(x, roi.width)
     roi.y = _clamp_origin(y, roi.height)
+    if _is_later_slide(project, slide):
+        roi.custom = True
     record_roi_move(project, roi)
 
 

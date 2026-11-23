@@ -19,6 +19,8 @@ class ReportSession {
   String? layoutJson;
   String? projectJson;
   bool dirty = false;
+  bool canUndo = false;
+  bool canRedo = false;
   bool _opened = false;
 
   String? get openedLayoutPath => _layoutPath;
@@ -36,6 +38,8 @@ class ReportSession {
     layoutJson = null;
     projectJson = null;
     dirty = false;
+    canUndo = false;
+    canRedo = false;
   }
 
   Future<void> open({
@@ -172,6 +176,12 @@ class ReportSession {
     }
     if (reply.containsKey('dirty')) {
       dirty = reply['dirty'] == true;
+    }
+    if (reply.containsKey('canUndo')) {
+      canUndo = reply['canUndo'] == true;
+    }
+    if (reply.containsKey('canRedo')) {
+      canRedo = reply['canRedo'] == true;
     }
   }
 }

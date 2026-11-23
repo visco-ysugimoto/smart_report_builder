@@ -29,7 +29,7 @@ def run(argv: list[str]) -> int:
     try:
         project = roi_edit.load_project(args.project)
         set_image_frame_kind(project, args.frame, args.role)
-        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=False)
+        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=True)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1

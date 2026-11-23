@@ -559,6 +559,7 @@ LABEL_VARIABLES = (
     "index",
     "n",
     "slide",
+    "page",
     "group",
     "task",
 )
@@ -576,13 +577,20 @@ def render_label(
     slide_number: int,
     *,
     focus: int | None = None,
+    assets: list[Asset] | None = None,
 ) -> RenderedLabel:
-    """自由な文と変数を混ぜる。値が無い変数は空にし、名前を missing に入れる。"""
+    """自由な文と変数を混ぜる。値が無い変数は空にし、名前を missing に入れる。
+
+    {index} は分類の中の番号、{n} は一覧の通し番号、{page} と {slide} はページ番号。
+    番号付き（{index2} など）はその枠の画像を指す。
+    """
     if not template:
         return RenderedLabel("", [])
-    values = {"slide": str(slide_number)}
+    page = str(slide_number)
+    values = {"slide": page, "page": page}
+    sequence = {asset.id: number for number, asset in enumerate(assets or [], start=1)}
 
-    def fill(asset: Asset | None, suffix: str) -> None:
+    def fill(asset: Asset | None, suffix: str, place: int) -> None:
         file_name = ""
         comment = ""
         txt = ""
@@ -590,6 +598,7 @@ def render_label(
         note = ""
         group = ""
         task = ""
+        serial = str(place)
         if asset is not None:
             file_name = asset.file_name or Path(asset.path).name
             comment = asset.list_comment or ""
@@ -598,18 +607,21 @@ def render_label(
             note = asset.note or ""
             group = asset.group or ""
             task = asset.task or ""
+            if asset.id in sequence:
+                serial = str(sequence[asset.id])
         values[f"comment{suffix}"] = comment
         values[f"note{suffix}"] = note
         values[f"txt{suffix}"] = txt
         values[f"file{suffix}"] = file_name
         values[f"index{suffix}"] = index
-        values[f"n{suffix}"] = index
+        values[f"n{suffix}"] = serial
         values[f"group{suffix}"] = group
         values[f"task{suffix}"] = task
 
-    fill(numbered.get(0 if focus is None else focus), "")
+    focus_key = 0 if focus is None else focus
+    fill(numbered.get(focus_key), "", focus_key + 1)
     for index, asset in numbered.items():
-        fill(asset, str(index + 1))
+        fill(asset, str(index + 1), index + 1)
     missing: list[str] = []
 
     def replace(match: re.Match[str]) -> str:
@@ -659,7 +671,7 @@ def _plan_labels(
             proposal.warnings.append(f"スライド{slide_number} の {names} は空です")
 
     if rule.title_template:
-        rendered = render_label(rule.title_template, numbered, slide_number)
+        rendered = render_label(rule.title_template, numbered, slide_number, assets=project.assets)
         current = "" if slide is None else slide.title.strip()
         manual = bool(current) and current != rendered.text and current != page_title
         remember("title", "title", rendered, manual, "手入力のタイトルは残します")
@@ -669,14 +681,16 @@ def _plan_labels(
         if node is None:
             proposal.warnings.append("ラベルを書く文章枠がありません")
             continue
-        rendered = render_label(template.template, numbered, slide_number)
+        rendered = render_label(template.template, numbered, slide_number, assets=project.assets)
         current = None if slide is None else _binding_text(slide, node.id)
         manual = _text_is_manual(current, node.text, rendered.text)
         remember("text", node.id, rendered, manual, "手入力のラベルは残します")
     for ref, item in zip(refs, made, strict=False):
         if not ref.label_template:
             continue
-        rendered = render_label(ref.label_template, numbered, slide_number, focus=item.frame_index)
+        rendered = render_label(
+            ref.label_template, numbered, slide_number, focus=item.frame_index, assets=project.assets
+        )
         current = None if slide is None else _binding_text(slide, item.element_id)
         manual = _text_is_manual(current, None, rendered.text)
         remember("frame", item.element_id, rendered, manual, "手入力のラベルは残します")

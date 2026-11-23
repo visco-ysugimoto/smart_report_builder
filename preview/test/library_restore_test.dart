@@ -90,6 +90,7 @@ void main() {
 
     state.setStep(WorkflowStep.expand);
     await tester.pump();
+    expect(find.byKey(const Key('expand:img-1')), findsOneWidget);
 
     state.setStep(WorkflowStep.master);
     await tester.pump();

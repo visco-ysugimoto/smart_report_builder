@@ -1,21 +1,25 @@
-"""1 枚目の型（content_master のルート）を、プリセット名から組み直す。
+"""型（content_master のルート）を、プリセット名から組み直す。
 
-bindings は役割を保つため、同じ element_id の枠が残る場合だけ維持する。
+--slide が無いときは 1 枚目の型を変え、同じ型を使っているスライドだけ追従する。
+--slide があるときはそのスライドだけ変える。型を他のスライドと共有しているときは
+コピーしてから組み直すので、隣のスライドの並びは残る。
+bindings は同じ element_id の枠が残る場合だけ維持する。
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import sys
 
 from smart_report_builder import roi_edit
 from smart_report_builder.models import (
     GAP_PT,
     TEXT_HEIGHT_PT,
-    Binding,
     FitMode,
     GridNode,
     ImageFrameNode,
+    LayoutDefinition,
     StackDirection,
     StackNode,
     TextNode,
@@ -86,18 +90,23 @@ _ROLE_LABELS = {
 def run(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pick-layout",
-        description="Rebuild the first slide's layout from a preset",
+        description="Rebuild a slide layout from a preset",
     )
     parser.add_argument("project")
     parser.add_argument("--preset", required=True, choices=sorted(_PRESETS))
+    parser.add_argument("--slide", help="このスライドだけ型を変える")
     parser.add_argument("--caption", default="")
     parser.add_argument("--layout")
     parser.add_argument("--pptx")
     args = parser.parse_args(argv)
     try:
         project = roi_edit.load_project(args.project)
+        if args.slide:
+            _prepare_one_slide(project, args.slide)
+        elif project.report_slides:
+            roi_edit._activate_slide(project, project.report_slides[0].id)
         _apply_preset(project, args.preset, args.caption)
-        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=False)
+        roi_edit._save_outputs(project, args.project, args.layout, args.pptx, record_undo=True)
     except ValueError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -149,10 +158,10 @@ def _apply_preset(project, preset: str, caption: str) -> None:
         role_id="caption",
         display_name="説明",
         text=caption_text,
-        height_pt=TEXT_HEIGHT_PT,
+        height_pt=TEXT_HEIGHT_PT if previous is None else previous.height_pt,
         place=caption_place,
         shown=True if previous is None else previous.shown,
-        font_pt=16.0 if previous is None else previous.font_pt,
+        font_pt=12.0 if previous is None else previous.font_pt,
     )
     children = [caption_node, image_block] if caption_place == "before" else [image_block, caption_node]
     root = StackNode(
@@ -164,17 +173,51 @@ def _apply_preset(project, preset: str, caption: str) -> None:
     master = project.content_master
     master.root = root
     master.name = _preset_label(preset)
-    # bindings は枠 ID が維持される範囲で残す
+    for layout in project.layouts:
+        if layout.content_master is master:
+            layout.name = master.name
+    # bindings は枠 ID が維持される範囲で残す。別の型を使っているスライドは触らない。
     frame_ids = {frame.id for frame in frames}
-    for slide in _slides(project):
+    for slide in _affected_slides(project):
         slide.bindings = [b for b in slide.bindings if b.element_id in frame_ids or b.element_id == "text-caption"]
         slide.rois = []
 
 
-def _slides(project):
-    if project.report_slides:
-        return [item.slide for item in project.report_slides]
-    return [project.slide]
+def _prepare_one_slide(project, slide_id: str) -> None:
+    """指定スライドを編集対象にする。型を共有しているときはそのスライド専用に分ける。"""
+    roi_edit._ensure_deck(project)
+    item = roi_edit._slide_by_id(project, slide_id)
+    layout = roi_edit._layout_by_id(project, item.layout_id)
+    shared = any(
+        other.layout_id == layout.id and other.id != item.id for other in project.report_slides
+    )
+    if shared:
+        cloned = copy.deepcopy(layout.content_master)
+        cloned.id = roi_edit._next_numbered_id(
+            "master-",
+            {entry.content_master.id for entry in project.layouts},
+        )
+        fresh = LayoutDefinition(
+            id=roi_edit._next_numbered_id("layout-", {entry.id for entry in project.layouts}),
+            name=layout.name,
+            content_master=cloned,
+        )
+        project.layouts.append(fresh)
+        item.layout_id = fresh.id
+        item.slide.content_master_id = cloned.id
+    roi_edit._activate_slide(project, item.id)
+
+
+def _affected_slides(project):
+    if not project.report_slides:
+        return [project.slide]
+    active = next(
+        (item for item in project.report_slides if item.id == project.active_slide_id),
+        None,
+    )
+    if active is None:
+        return [project.slide]
+    return [item.slide for item in project.report_slides if item.layout_id == active.layout_id]
 
 
 def _display_name(role: str, index: int, taken: set[str]) -> str:

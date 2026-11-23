@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from PIL import Image
 from pptx import Presentation
 
@@ -34,6 +35,7 @@ from smart_report_builder.layout import layout_slide
 from smart_report_builder.models import FitMode, ImageFrameNode, TextNode
 from smart_report_builder.project_factory import create_report
 from smart_report_builder.project_store import load_project, save_project
+from smart_report_builder.roi_edit import main as edit_main
 
 
 def _png(path: Path) -> Path:
@@ -403,6 +405,72 @@ def test_expand_keeps_vtv_tray_order_across_separate_lists(tmp_path: Path):
     assert bound_names(1) == ["img_3.png", "img_4.png"]
 
 
+def test_index_serial_and_page_numbers_differ(tmp_path: Path):
+    """{index} は分類内の番号、{n} は一覧の通し番号、{page} はページ番号。"""
+    project_path = _save_initial_project(tmp_path)
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
+    images = [_png(tmp_path / f"img_{i}.png") for i in range(1, 5)]
+    records = [
+        {
+            "path": str(images[0]),
+            "source": "folder",
+            "listIndex": 1,
+            "fileName": images[0].name,
+            "listComment": "外観",
+        },
+        {
+            "path": str(images[1]),
+            "source": "folder",
+            "listIndex": 1,
+            "fileName": images[1].name,
+            "listComment": "拡大",
+        },
+        {
+            "path": str(images[2]),
+            "source": "folder",
+            "listIndex": 2,
+            "fileName": images[2].name,
+            "listComment": "外観",
+        },
+        {
+            "path": str(images[3]),
+            "source": "folder",
+            "listIndex": 2,
+            "fileName": images[3].name,
+            "listComment": "拡大",
+        },
+    ]
+    records_path = tmp_path / "records.json"
+    records_path.write_text(json.dumps(records), encoding="utf-8")
+    assert add_source.run([str(project_path), "--records", str(records_path)]) == 0
+    assert (
+        pick_templates.run(
+            [
+                str(project_path),
+                "--title",
+                "{page}-{index}-{n}",
+                "--caption",
+                "{comment} {index2}/{n2} p{page}",
+            ]
+        )
+        == 0
+    )
+    assert expand.run([str(project_path), "--overwrite-labels"]) == 0
+    project = load_project(project_path)
+    assert [item.slide.title for item in project.report_slides] == ["1-1-1", "2-2-3"]
+
+    def caption(ordinal: int) -> str:
+        binding = next(
+            item
+            for item in project.report_slides[ordinal].slide.bindings
+            if item.element_id == "text-caption"
+        )
+        return binding.text or ""
+
+    assert caption(0) == "外観 1/2 p1"
+    assert caption(1) == "外観 2/4 p2"
+
+
 def test_expand_keeps_the_first_slide_and_continues_in_order(tmp_path: Path):
     project_path = _save_initial_project(tmp_path)
     assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
@@ -505,6 +573,54 @@ def test_full_flow_from_scratch_produces_four_slides_and_pptx(tmp_path: Path):
     assert len(presentation.slides) == 2
 
 
+def test_caption_height_changes_the_text_frame(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    assert update_slide.run([str(project_path), "--caption-height", "160"]) == 0
+    project = load_project(project_path)
+    caption = next(
+        node
+        for node in _walk(project.content_master.root)
+        if isinstance(node, TextNode) and node.role_id == "caption"
+    )
+    assert caption.height_pt == 160
+    placed = layout_slide(project)
+    frame = next(item for item in placed.elements if item.element_id == "text-caption")
+    assert frame.frame.height == 160
+    assert update_slide.run([str(project_path), "--caption-height", "10"]) == 0
+    project = load_project(project_path)
+    caption = next(
+        node
+        for node in _walk(project.content_master.root)
+        if isinstance(node, TextNode) and node.role_id == "caption"
+    )
+    assert caption.height_pt == 28
+    placed = layout_slide(project)
+    assert not any(
+        item.element_id == "text-caption" and "小さすぎ" in item.message
+        for item in placed.violations
+    )
+
+
+def test_caption_defaults_to_12pt_and_can_be_9pt(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    project = load_project(project_path)
+    caption = next(
+        node
+        for node in _walk(project.content_master.root)
+        if isinstance(node, TextNode) and node.role_id == "caption"
+    )
+    assert caption.font_pt == 12
+    assert update_slide.run([str(project_path), "--text-size", "text-caption", "9"]) == 0
+    assert update_slide.run([str(project_path), "--text-size", "text-caption", "8"]) == 1
+    project = load_project(project_path)
+    caption = next(
+        node
+        for node in _walk(project.content_master.root)
+        if isinstance(node, TextNode) and node.role_id == "caption"
+    )
+    assert caption.font_pt == 9
+
+
 def test_title_template_appears_on_the_slide_preview(tmp_path: Path):
     project = create_report(paper="landscape")
     project_path = tmp_path / "project.json"
@@ -546,6 +662,114 @@ def test_expand_keeps_headings_on_the_first_slide(tmp_path: Path):
     assert first.text == "全体"
     assert second.text == "別見出し"
 
+    assert update_slide.run([str(project_path), "--heading", "frame-1", "更新"]) == 0
+    assert update_slide.run([str(project_path), "--heading-place", "frame-1", "above"]) == 0
+    assert update_slide.run([str(project_path), "--heading-size", "frame-1", "22"]) == 0
+    assert expand.run([str(project_path)]) == 0
+    project = load_project(project_path)
+    first = next(item for item in project.report_slides[0].slide.bindings if item.element_id == "frame-1")
+    second = next(item for item in project.report_slides[1].slide.bindings if item.element_id == "frame-1")
+    assert first.text == "更新"
+    assert first.text_anchor == "above"
+    assert first.font_pt == 22
+    assert second.text == "別見出し"
+    assert second.text_anchor == "below"
+
+
+def test_zoom_headings_follow_the_first_slide(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
+    assert pick_roles.run([str(project_path), "--frame", "frame-2", "--role", "zoom"]) == 0
+    images = [_png(tmp_path / f"img_{i}.png") for i in range(1, 3)]
+    records_path = _write_records(tmp_path / "records.json", images)
+    assert add_source.run([str(project_path), "--records", str(records_path)]) == 0
+    project = load_project(project_path)
+    assert update_slide.run([str(project_path), "--bind", "frame-1", project.assets[0].id]) == 0
+    assert update_slide.run([str(project_path), "--zoom-from", "frame-2", "frame-1"]) == 0
+    assert update_slide.run([str(project_path), "--heading", "frame-2", "拡大見出し"]) == 0
+    assert update_slide.run([str(project_path), "--heading-place", "frame-2", "below"]) == 0
+    assert update_slide.run([str(project_path), "--heading-size", "frame-2", "18"]) == 0
+    assert expand.run([str(project_path)]) == 0
+
+    project = load_project(project_path)
+    assert len(project.report_slides) == 2
+    for report in project.report_slides:
+        binding = next(item for item in report.slide.bindings if item.element_id == "frame-2")
+        assert binding.text == "拡大見出し"
+        assert binding.text_anchor == "below"
+        assert binding.font_pt == 18
+
+    assert update_slide.run([str(project_path), "--heading", "frame-2", "更新した拡大"]) == 0
+    assert expand.run([str(project_path)]) == 0
+    project = load_project(project_path)
+    for report in project.report_slides:
+        binding = next(item for item in report.slide.bindings if item.element_id == "frame-2")
+        assert binding.text == "更新した拡大"
+
+
+def test_heading_placeholders_follow_each_slide(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
+    images = [_png(tmp_path / f"img_{i}.png") for i in range(1, 5)]
+    records = [
+        {
+            "path": str(images[0]),
+            "source": "folder",
+            "listIndex": 1,
+            "fileName": images[0].name,
+            "listComment": "外観",
+        },
+        {
+            "path": str(images[1]),
+            "source": "folder",
+            "listIndex": 1,
+            "fileName": images[1].name,
+            "listComment": "拡大",
+        },
+        {
+            "path": str(images[2]),
+            "source": "folder",
+            "listIndex": 2,
+            "fileName": images[2].name,
+            "listComment": "外観",
+        },
+        {
+            "path": str(images[3]),
+            "source": "folder",
+            "listIndex": 2,
+            "fileName": images[3].name,
+            "listComment": "拡大",
+        },
+    ]
+    records_path = tmp_path / "records.json"
+    records_path.write_text(json.dumps(records), encoding="utf-8")
+    assert add_source.run([str(project_path), "--records", str(records_path)]) == 0
+    assert update_slide.run([str(project_path), "--heading", "frame-1", "{comment} {index} p{page}"]) == 0
+    assert update_slide.run([str(project_path), "--heading", "frame-2", "{n}"]) == 0
+    assert expand.run([str(project_path)]) == 0
+
+    project = load_project(project_path)
+    for report in project.report_slides:
+        texts = {item.element_id: item.text for item in report.slide.bindings}
+        assert texts["frame-1"] == "{comment} {index} p{page}"
+        assert texts["frame-2"] == "{n}"
+
+    first = _placed_slide(project, 0)
+    assert first["frame-1"].rendered_text == "外観 1 p1"
+    assert first["frame-2"].rendered_text == "2"
+    second = _placed_slide(project, 1)
+    assert second["frame-1"].rendered_text == "外観 2 p2"
+    assert second["frame-2"].rendered_text == "4"
+
+
+def _placed_slide(project, ordinal: int):
+    item = project.report_slides[ordinal]
+    layout = next(layout for layout in project.layouts if layout.id == item.layout_id)
+    project.content_master = layout.content_master
+    project.slide = item.slide
+    project.active_slide_id = item.id
+    return {element.element_id: element for element in layout_slide(project).elements}
+
 
 def test_added_text_can_be_resized_and_deleted(tmp_path: Path):
     project_path = _save_initial_project(tmp_path)
@@ -562,6 +786,101 @@ def test_added_text_can_be_resized_and_deleted(tmp_path: Path):
     assert update_slide.run([str(project_path), "--remove-text", note.id]) == 0
     project = load_project(project_path)
     assert all(not (isinstance(node, TextNode) and node.id == note.id) for node in _walk(project.content_master.root))
+
+
+def test_one_slide_can_change_its_layout_after_expand(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
+    assert update_slide.run([str(project_path), "--add-text", "--text", "メモ"]) == 0
+    images = [_png(tmp_path / f"img_{i}.png") for i in range(1, 5)]
+    records_path = _write_records(tmp_path / "records.json", images)
+    assert add_source.run([str(project_path), "--records", str(records_path)]) == 0
+    project = load_project(project_path)
+    assert update_slide.run([str(project_path), "--bind", "frame-1", project.assets[0].id]) == 0
+    assert update_slide.run([str(project_path), "--bind", "frame-2", project.assets[1].id]) == 0
+    assert expand.run([str(project_path)]) == 0
+    assert update_slide.run([str(project_path), "--slide", "slide-2", "--heading", "frame-1", "個別"]) == 0
+
+    assert pick_layout.run([str(project_path), "--preset", "grid-2x2", "--slide", "slide-2"]) == 0
+    project = load_project(project_path)
+    first = project.report_slides[0]
+    second = project.report_slides[1]
+    assert first.layout_id != second.layout_id
+    assert len(_frames(project, first.layout_id)) == 2
+    assert len(_frames(project, second.layout_id)) == 4
+    assert any(
+        isinstance(node, TextNode) and node.role_id == "note"
+        for node in _walk(_layout_master(project, first.layout_id).root)
+    )
+    assert all(
+        not (isinstance(node, TextNode) and node.role_id == "note")
+        for node in _walk(_layout_master(project, second.layout_id).root)
+    )
+    heading = next(item for item in second.slide.bindings if item.element_id == "frame-1")
+    assert heading.text == "個別"
+    kept = {item.element_id: item.asset_id for item in first.slide.bindings if item.asset_id}
+    assert kept["frame-1"] == project.assets[0].id
+    assert kept["frame-2"] == project.assets[1].id
+
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-3"]) == 0
+    project = load_project(project_path)
+    assert len(_frames(project, project.report_slides[0].layout_id)) == 3
+    assert len(_frames(project, project.report_slides[1].layout_id)) == 4
+
+    assert expand.run([str(project_path)]) == 0
+    project = load_project(project_path)
+    assert len(project.layouts) == 1
+    assert {item.layout_id for item in project.report_slides} == {project.layouts[0].id}
+    assert len(_frames(project, project.layouts[0].id)) == 3
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2", "--slide", "missing"]) == 1
+
+
+def test_resizing_one_slide_leaves_the_other_slide_untouched(tmp_path: Path):
+    project_path = _save_initial_project(tmp_path)
+    assert pick_layout.run([str(project_path), "--preset", "horizontal-2"]) == 0
+    images = [_png(tmp_path / f"img_{i}.png") for i in range(1, 5)]
+    records_path = _write_records(tmp_path / "records.json", images)
+    assert add_source.run([str(project_path), "--records", str(records_path)]) == 0
+    project = load_project(project_path)
+    assert update_slide.run([str(project_path), "--bind", "frame-1", project.assets[0].id]) == 0
+    assert update_slide.run([str(project_path), "--bind", "frame-2", project.assets[1].id]) == 0
+    assert expand.run([str(project_path)]) == 0
+
+    assert (
+        edit_main(
+            [
+                "resize-frame",
+                str(project_path),
+                "frame-1",
+                "0.1",
+                "0.1",
+                "0.3",
+                "0.4",
+                "--slide",
+                "slide-2",
+            ]
+        )
+        == 0
+    )
+    project = load_project(project_path)
+    first = next(item for item in _frames(project, project.report_slides[0].layout_id) if item.id == "frame-1")
+    second = next(item for item in _frames(project, project.report_slides[1].layout_id) if item.id == "frame-1")
+    assert first.free_rect is None
+    assert second.free_rect is not None
+    assert second.free_rect.width == pytest.approx(0.3)
+    assert edit_main(["resize-frame", str(project_path), "frame-1", "0", "0", "0.3", "0.4", "--slide", "missing"]) == 1
+
+
+def _frames(project, layout_id: str):
+    return [
+        node
+        for node in _walk(_layout_master(project, layout_id).root)
+        if isinstance(node, ImageFrameNode)
+    ]
+
+
+def _layout_master(project, layout_id: str):
+    return next(item for item in project.layouts if item.id == layout_id).content_master
 
 
 def _walk(node):

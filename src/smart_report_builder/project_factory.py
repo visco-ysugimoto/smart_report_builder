@@ -81,6 +81,7 @@ def create_report(
                 display_name="説明",
                 text=caption,
                 height_pt=TEXT_HEIGHT_PT,
+                font_pt=12.0,
             ),
         ],
     )

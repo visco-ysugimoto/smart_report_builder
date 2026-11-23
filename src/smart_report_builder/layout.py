@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import unicodedata
+from dataclasses import replace
 
 from smart_report_builder.fit import contain_rect, map_normalized_rect
 from smart_report_builder.models import (
@@ -84,6 +85,7 @@ def layout_slide(project: Project) -> LayoutResult:
     )
     note_bounds = bounds if design.body is not None else Rect(0, 0, design.slide_width_pt, design.slide_height_pt)
     _apply_rois(elements, project, image_assets, violations, note_bounds)
+    _render_heading_templates(project, elements)
     _annotate_geometry(elements, design, violations)
     title_text = project.slide.title.strip()
     if design.orientation:
@@ -114,6 +116,55 @@ def layout_slide(project: Project) -> LayoutResult:
         title_color=design.title_color,
         title_shape_name=design.title_shape_name,
     )
+
+
+def _render_heading_templates(project: Project, elements: list[PlacedElement]) -> None:
+    """見出しの {page} や {comment} を、このスライドの画像に合わせて表示文字にする。"""
+    from smart_report_builder.ordered_assignment import render_label
+
+    order = _contain_frame_ids(project.content_master.root)
+    by_id = {asset.id: asset for asset in project.assets}
+    bindings = {item.element_id: item for item in project.slide.bindings}
+    numbered: dict[int, Asset | None] = {}
+    for index, frame_id in enumerate(order):
+        binding = bindings.get(frame_id)
+        asset = None
+        if binding is not None and binding.asset_id:
+            asset = by_id.get(binding.asset_id)
+        numbered[index] = asset
+    slide_number = _slide_number(project)
+    index_of = {frame_id: index for index, frame_id in enumerate(order)}
+    for index, element in enumerate(elements):
+        template = element.text or ""
+        if element.kind != "image_frame" or "{" not in template:
+            continue
+        focus = index_of.get(element.element_id)
+        if focus is None and element.source_element_id:
+            focus = index_of.get(element.source_element_id)
+        rendered = render_label(
+            template,
+            numbered,
+            slide_number,
+            focus=focus,
+            assets=project.assets,
+        ).text
+        elements[index] = replace(element, rendered_text=rendered)
+
+
+def _contain_frame_ids(node: Element) -> list[str]:
+    found: list[str] = []
+    if isinstance(node, ImageFrameNode) and node.fit_mode == FitMode.CONTAIN:
+        found.append(node.id)
+    for child in getattr(node, "children", []) or []:
+        found.extend(_contain_frame_ids(child))
+    return found
+
+
+def _slide_number(project: Project) -> int:
+    for index, item in enumerate(project.report_slides, start=1):
+        if item.id == project.active_slide_id or item.slide is project.slide:
+            return index
+    return 1
 
 
 def _content_bounds(design: DesignMaster) -> Rect:
@@ -945,7 +996,7 @@ def _annotate_geometry(
             )
         if (
             element.kind in {"image_frame", "text"}
-            and element.role_id != "note"
+            and element.role_id not in {"note", "caption"}
             and _tight(element.frame)
         ):
             violations.append(

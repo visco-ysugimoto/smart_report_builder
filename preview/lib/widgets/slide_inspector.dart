@@ -75,11 +75,6 @@ class _SlideInspectorState extends State<SlideInspector> {
                     fontWeight: FontWeight.w700,
                   ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              slideId,
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
-            ),
             const SizedBox(height: 14),
             Text('ページタイトル', style: Theme.of(context).textTheme.labelMedium),
             const SizedBox(height: 4),

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:smart_report_preview/screens/expand_screen.dart';
 import 'package:smart_report_preview/screens/master_slide_screen.dart';
 import 'package:smart_report_preview/screens/start_screen.dart';
@@ -45,11 +46,23 @@ class _RootRouter extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = AppScope.stateOf(context);
-    return Scaffold(
+    final service = AppScope.serviceOf(context);
+    return CallbackShortcuts(
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyZ, control: true): () {
+          service.undo();
+        },
+        const SingleActivator(LogicalKeyboardKey.keyY, control: true): () {
+          service.redo();
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
       body: Column(
-        children: [
+              children: [
           const StepHeader(),
-          Expanded(
+                Expanded(
             child: IndexedStack(
               index: state.step.index,
               sizing: StackFit.expand,
@@ -61,6 +74,8 @@ class _RootRouter extends StatelessWidget {
             ),
           ),
         ],
+      ),
+        ),
       ),
     );
   }

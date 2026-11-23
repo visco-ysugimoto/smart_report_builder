@@ -84,12 +84,32 @@ class _FindingEditorState extends State<FindingEditor> {
                 ),
               ],
             ),
-            const SizedBox(height: 10),
-            Text(
-              '使える差し込み: {group}, {task}, {txt}, {comment}, {file}, {index}, {n}, {slide}',
-              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+            const SizedBox(height: 4),
+            Theme(
+              data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                key: const Key('finding-tokens'),
+                tilePadding: EdgeInsets.zero,
+                childrenPadding: const EdgeInsets.only(bottom: 8),
+                title: Text(
+                  '差し込み {page} {index} {n} {comment}',
+                  style: TextStyle(fontSize: 12, color: scheme.onSurfaceVariant),
+                ),
+                children: [
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      '{page} ページ番号（{slide} も同じ）\n'
+                      '{index} 分類の中の番号\n'
+                      '{n} 一覧の通し番号\n'
+                      '{group} {task} {txt} {comment} {file}\n'
+                      '枠ごとなら {index1} {comment2}',
+                      style: TextStyle(fontSize: 11, height: 1.35, color: scheme.onSurfaceVariant),
+                    ),
+                  ),
+                ],
+              ),
             ),
-            const SizedBox(height: 12),
             Text('スライドタイトル', style: Theme.of(context).textTheme.labelMedium),
             const SizedBox(height: 4),
             TextField(
@@ -123,7 +143,7 @@ class _FindingEditorState extends State<FindingEditor> {
                 expands: true,
                 textAlignVertical: TextAlignVertical.top,
                 decoration: const InputDecoration(
-                  hintText: '例: 検査結果 {index}: {comment}',
+                  hintText: '例: {page}ページ {comment} の{index}枚目（通し{n}）',
                 ),
                 onChanged: (_) => _schedule(),
               ),
@@ -156,6 +176,9 @@ class _FindingEditorState extends State<FindingEditor> {
               initialValue: caption.fontPt,
               decoration: const InputDecoration(isDense: true),
               items: const [
+                DropdownMenuItem(value: 9, child: Text('9 pt')),
+                DropdownMenuItem(value: 10, child: Text('10 pt')),
+                DropdownMenuItem(value: 11, child: Text('11 pt')),
                 DropdownMenuItem(value: 12, child: Text('12 pt')),
                 DropdownMenuItem(value: 14, child: Text('14 pt')),
                 DropdownMenuItem(value: 16, child: Text('16 pt')),
@@ -184,7 +207,7 @@ class _FindingEditorState extends State<FindingEditor> {
   }
 
   _CaptionStyle _captionStyle(String? projectJson) {
-    const fallback = _CaptionStyle(id: 'text-caption', shown: true, place: 'below', fontPt: 16);
+    const fallback = _CaptionStyle(id: 'text-caption', shown: true, place: 'below', fontPt: 12);
     if (projectJson == null) return fallback;
     try {
       final decoded = jsonDecode(projectJson);
@@ -202,12 +225,12 @@ class _FindingEditorState extends State<FindingEditor> {
     if (root is! Map) return null;
     if (root['kind'] == 'text' && root['roleId'] == 'caption') {
       final size = root['fontPt'];
-      final font = size is num ? size.round() : 16;
+      final font = size is num ? size.round() : 12;
       return _CaptionStyle(
         id: root['id']?.toString() ?? 'text-caption',
         shown: root['shown'] != false,
         place: root['place'] == 'before' ? 'above' : 'below',
-        fontPt: const {12, 14, 16, 18, 22, 28, 36}.contains(font) ? font : 16,
+        fontPt: const {9, 10, 11, 12, 14, 16, 18, 22, 28, 36}.contains(font) ? font : 12,
       );
     }
     final children = root['children'];

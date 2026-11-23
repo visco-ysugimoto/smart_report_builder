@@ -46,6 +46,21 @@ class StepHeader extends StatelessWidget {
           Expanded(child: _StepIndicator(step: state.step)),
           const SizedBox(width: 16),
           if (state.hasOpenProject) ...[
+            IconButton(
+              key: const Key('header-undo'),
+              tooltip: '元に戻す (Ctrl+Z)',
+              visualDensity: VisualDensity.compact,
+              onPressed: state.busy || !state.canUndo ? null : () => service.undo(),
+              icon: const Icon(Icons.undo, size: 20),
+            ),
+            IconButton(
+              key: const Key('header-redo'),
+              tooltip: 'やり直す (Ctrl+Y)',
+              visualDensity: VisualDensity.compact,
+              onPressed: state.busy || !state.canRedo ? null : () => service.redo(),
+              icon: const Icon(Icons.redo, size: 20),
+            ),
+            const SizedBox(width: 4),
             if (state.step != WorkflowStep.start)
               OutlinedButton.icon(
                 key: const Key('header-close-project'),

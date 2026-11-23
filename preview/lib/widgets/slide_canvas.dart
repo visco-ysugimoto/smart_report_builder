@@ -24,8 +24,10 @@ class SlideCanvas extends StatelessWidget {
     this.onHeadingSize,
     this.onTextSize,
     this.onMoveText,
+    this.onCaptionHeight,
     this.onTextBody,
     this.onDeleteText,
+    this.onResizeFrame,
     super.key,
   });
 
@@ -48,8 +50,16 @@ class SlideCanvas extends StatelessWidget {
   final Future<void> Function(String textId, double size)? onTextSize;
   final Future<void> Function(String textId, double x, double y, double width, double height)?
       onMoveText;
+  final Future<void> Function(String textId, double height)? onCaptionHeight;
   final Future<void> Function(String textId, String text)? onTextBody;
   final Future<void> Function(String textId)? onDeleteText;
+  final Future<void> Function(
+    String frameId,
+    double x,
+    double y,
+    double width,
+    double height,
+  )? onResizeFrame;
 
   @override
   Widget build(BuildContext context) {
@@ -84,22 +94,24 @@ class SlideCanvas extends StatelessWidget {
                   onDropLibraryImage: onDropLibraryImage,
                   onMoveZoomRegion: onMoveZoomRegion,
                   onMoveText: onMoveText,
+                  onCaptionHeight: onCaptionHeight,
+                  onResizeFrame: onResizeFrame,
                 ),
               ),
             ),
-            if (_selectedElement(current) case final selected?)
+            if (_selectedElement(current) case final selected? when selected.roleId != 'caption')
               Positioned(
                 right: 12,
                 top: 12,
                 child: selected.kind == 'text'
                     ? _TextInspector(
-                        element: selected,
-                        onTextBody: onTextBody,
-                        onTextSize: onTextSize,
-                        onMoveText: onMoveText,
-                        onDeleteText: onDeleteText,
-                        onClose: () => onSelectFrame?.call(null),
-                      )
+                            element: selected,
+                            onTextBody: onTextBody,
+                            onTextSize: onTextSize,
+                            onMoveText: onMoveText,
+                            onDeleteText: onDeleteText,
+                            onClose: () => onSelectFrame?.call(null),
+                          )
                     : _FrameInspector(
                         frame: selected,
                         sourceFrames: [
@@ -111,19 +123,20 @@ class SlideCanvas extends StatelessWidget {
                         onHeading: onHeading,
                         onHeadingPlace: onHeadingPlace,
                         onHeadingSize: onHeadingSize,
+                        onResizeFrame: onResizeFrame,
                         onClose: () => onSelectFrame?.call(null),
                       ),
               ),
-            Positioned(
-              left: 8,
-              bottom: 8,
-              child: _PreviewBadge(previewMode: current.previewMode),
-            ),
             if (current.violations.isNotEmpty)
               Positioned(
                 left: 8,
                 top: 8,
-                child: _ViolationBadge(count: current.violations.length, color: scheme.error),
+                child: _ViolationBadge(
+                  violations: current.violations,
+                  elements: current.elements,
+                  color: scheme.error,
+                  onSelect: onSelectFrame,
+                ),
               ),
           ],
         );
@@ -162,6 +175,8 @@ class _SlideBoard extends StatefulWidget {
     required this.onDropLibraryImage,
     required this.onMoveZoomRegion,
     required this.onMoveText,
+    required this.onCaptionHeight,
+    required this.onResizeFrame,
   });
 
   final LayoutResult result;
@@ -178,6 +193,14 @@ class _SlideBoard extends StatefulWidget {
   )? onMoveZoomRegion;
   final Future<void> Function(String textId, double x, double y, double width, double height)?
       onMoveText;
+  final Future<void> Function(String textId, double height)? onCaptionHeight;
+  final Future<void> Function(
+    String frameId,
+    double x,
+    double y,
+    double width,
+    double height,
+  )? onResizeFrame;
 
   @override
   State<_SlideBoard> createState() => _SlideBoardState();
@@ -194,12 +217,18 @@ class _SlideBoardState extends State<_SlideBoard> {
   double? _textY;
   double? _textW;
   double? _textH;
+  String? _dragPictureId;
+  double? _picX;
+  double? _picY;
+  double? _picW;
+  double? _picH;
   bool _saving = false;
 
   LayoutResult get result => widget.result;
   double get scale => widget.scale;
   String? get selectedFrameId => widget.selectedFrameId;
   ValueChanged<String?> get onSelectFrame => widget.onSelectFrame;
+  Future<void> Function(String textId, double height)? get onCaptionHeight => widget.onCaptionHeight;
   Future<void> Function(String frameId, LibraryImage image)? get onDropLibraryImage =>
       widget.onDropLibraryImage;
 
@@ -207,7 +236,10 @@ class _SlideBoardState extends State<_SlideBoard> {
   Widget build(BuildContext context) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
-      onTap: () => onSelectFrame(null),
+      onTap: () {
+        FocusManager.instance.primaryFocus?.unfocus();
+        onSelectFrame(null);
+      },
       child: Container(
         decoration: BoxDecoration(
           color: Colors.white,
@@ -279,39 +311,22 @@ class _SlideBoardState extends State<_SlideBoard> {
       },
       builder: (context, candidate, rejected) {
         final isHovering = candidate.isNotEmpty;
+        if (hasImage && !isHovering) return const SizedBox.expand();
         return GestureDetector(
           onTap: () => onSelectFrame(element.elementId),
           child: Container(
             decoration: BoxDecoration(
               color: isHovering
                   ? scheme.primaryContainer.withValues(alpha: 0.3)
-                  : (hasImage ? Colors.transparent : scheme.surfaceContainerLow),
+                  : scheme.surfaceContainerLow,
               border: Border.all(
-                color: selected
-                    ? scheme.primary
-                    : isHovering
-                        ? scheme.primary
-                        : scheme.outline.withValues(alpha: 0.6),
-                width: selected || isHovering ? 2 : 1,
+                color: isHovering ? scheme.primary : scheme.outline.withValues(alpha: 0.6),
+                width: isHovering ? 2 : 1,
               ),
             ),
-            child: Stack(
-              children: [
-                if (hasImage)
-                  _positionedWithin(
-                    element.frame,
-                    element.contentRect!,
-                    child: element.fitMode == 'roi' && _shownCrop(element) != null
-                        ? _CroppedImage(path: element.assetPath!, crop: _shownCrop(element)!)
-                        : Image.file(
-                            File(element.assetPath!),
-                            fit: BoxFit.contain,
-                            cacheWidth: 1200,
-                            errorBuilder: (_, _, _) => const SizedBox.shrink(),
-                          ),
-                  ),
-                if (!hasImage)
-                  Center(
+            child: hasImage
+                ? null
+                : Center(
                     child: Padding(
                       padding: const EdgeInsets.all(4),
                       child: Column(
@@ -321,31 +336,27 @@ class _SlideBoardState extends State<_SlideBoard> {
                             element.fitMode == 'roi'
                                 ? Icons.center_focus_strong
                                 : Icons.image_outlined,
-                            size: 20 * scale * 2,
+                            size: 18,
                             color: scheme.outline,
                           ),
                           const SizedBox(height: 4),
                           Text(
                             element.fitMode == 'roi' ? '拡大元を選択' : element.displayName,
                             textAlign: TextAlign.center,
-                            style: TextStyle(
-                              fontSize: 10 * scale * 1.5,
-                              color: scheme.onSurfaceVariant,
-                            ),
+                            style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
                           ),
                         ],
                       ),
                     ),
                   ),
-              ],
-            ),
           ),
         );
       },
     );
     final widgets = <Widget>[_positioned(element.frame, child: child)];
-    final label = element.labelFrame;
-    final heading = (element.text ?? '').trim();
+    if (hasImage) widgets.add(_picture(context, element, selected));
+    final label = _shownLabel(element);
+    final heading = (element.renderedText ?? element.text ?? '').trim();
     if (label != null && heading.isNotEmpty) {
       widgets.add(
         _positioned(
@@ -368,12 +379,222 @@ class _SlideBoardState extends State<_SlideBoard> {
     return widgets;
   }
 
+  Widget _picture(BuildContext context, PlacedElement element, bool selected) {
+    final scheme = Theme.of(context).colorScheme;
+    final box = Container(
+      decoration: BoxDecoration(
+        border: Border.all(
+          color: selected ? scheme.primary : scheme.outline.withValues(alpha: 0.45),
+          width: selected ? 2 : 1,
+        ),
+      ),
+      child: element.fitMode == 'roi' && _shownCrop(element) != null
+          ? _CroppedImage(path: element.assetPath!, crop: _shownCrop(element)!)
+          : Image.file(
+              File(element.assetPath!),
+              fit: BoxFit.fill,
+              cacheWidth: 1200,
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            ),
+    );
+    return _positioned(
+      _pictureBox(element),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          Positioned.fill(
+            child: GestureDetector(
+              onTap: () => onSelectFrame(element.elementId),
+              onPanStart: element.groupFrame == null ? null : (_) => _beginPicture(element),
+              onPanUpdate: (details) => _movePicture(details.delta),
+              onPanEnd: (_) => _commitPicture(),
+              onPanCancel: _commitPicture,
+              child: MouseRegion(
+                cursor: element.groupFrame == null
+                    ? SystemMouseCursors.basic
+                    : SystemMouseCursors.move,
+                child: box,
+              ),
+            ),
+          ),
+          if (selected && element.groupFrame != null)
+            for (final handle in const [
+              (horizontal: -1, vertical: 0),
+              (horizontal: 1, vertical: 0),
+              (horizontal: 0, vertical: -1),
+              (horizontal: 0, vertical: 1),
+              (horizontal: -1, vertical: -1),
+              (horizontal: 1, vertical: -1),
+              (horizontal: 1, vertical: 1),
+              (horizontal: -1, vertical: 1),
+            ])
+              _pictureHandle(element, handle.horizontal, handle.vertical),
+        ],
+      ),
+    );
+  }
+
+  SlideRect _pictureBox(PlacedElement element) {
+    if (_dragPictureId == element.elementId &&
+        _picX != null &&
+        _picY != null &&
+        _picW != null &&
+        _picH != null) {
+      return SlideRect(x: _picX!, y: _picY!, width: _picW!, height: _picH!);
+    }
+    return pictureBox(element);
+  }
+
+  void _beginPicture(PlacedElement element) {
+    if (_saving || element.groupFrame == null) return;
+    final box = pictureBox(element);
+    setState(() {
+      _dragPictureId = element.elementId;
+      _picX = box.x;
+      _picY = box.y;
+      _picW = box.width;
+      _picH = box.height;
+    });
+    onSelectFrame(element.elementId);
+  }
+
+  void _movePicture(Offset delta) {
+    final element = _draggedPicture();
+    if (_saving || element == null || element.groupFrame == null) return;
+    final next = movePicture(
+      SlideRect(x: _picX!, y: _picY!, width: _picW!, height: _picH!),
+      element.groupFrame!,
+      delta.dx / scale,
+      delta.dy / scale,
+    );
+    setState(() {
+      _picX = next.x;
+      _picY = next.y;
+      _picW = next.width;
+      _picH = next.height;
+    });
+  }
+
+  Widget _pictureHandle(PlacedElement element, int horizontal, int vertical) {
+    const size = 12.0;
+    return Align(
+      alignment: Alignment(horizontal.toDouble(), vertical.toDouble()),
+      child: MouseRegion(
+        cursor: _resizeCursor(horizontal, vertical),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onPanStart: (_) => _beginPicture(element),
+          onPanUpdate: (details) => _resizePicture(details.delta, horizontal, vertical),
+          onPanEnd: (_) => _commitPicture(),
+          onPanCancel: _commitPicture,
+          child: Container(
+            width: size,
+            height: size,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              border: Border.all(color: Theme.of(context).colorScheme.primary, width: 2),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _resizePicture(Offset delta, int horizontal, int vertical) {
+    final element = _draggedPicture();
+    if (_saving || element == null || element.groupFrame == null) return;
+    final next = resizePicture(
+      SlideRect(x: _picX!, y: _picY!, width: _picW!, height: _picH!),
+      element.groupFrame!,
+      dx: delta.dx / scale,
+      dy: delta.dy / scale,
+      horizontal: horizontal,
+      vertical: vertical,
+    );
+    setState(() {
+      _picX = next.x;
+      _picY = next.y;
+      _picW = next.width;
+      _picH = next.height;
+    });
+  }
+
+  PlacedElement? _draggedPicture() {
+    final id = _dragPictureId;
+    if (id == null || _picX == null) return null;
+    for (final element in result.elements) {
+      if (element.elementId == id) return element;
+    }
+    return null;
+  }
+
+  SlideRect? _shownLabel(PlacedElement element) {
+    final label = element.labelFrame;
+    if (label == null) return null;
+    if (_dragPictureId != element.elementId || _picX == null || _picY == null) return label;
+    final origin = pictureBox(element);
+    final picture = SlideRect(x: _picX!, y: _picY!, width: _picW!, height: _picH!);
+    final moved = (picture.width - origin.width).abs() < 0.5 &&
+        (picture.height - origin.height).abs() < 0.5;
+    if (moved) {
+      return SlideRect(
+        x: label.x + picture.x - origin.x,
+        y: label.y + picture.y - origin.y,
+        width: label.width,
+        height: label.height,
+      );
+    }
+    final below = element.textAnchor == 'below';
+    return SlideRect(
+      x: picture.x,
+      y: below ? picture.y + picture.height : picture.y - label.height,
+      width: picture.width,
+      height: label.height,
+    );
+  }
+
+  Future<void> _commitPicture() async {
+    final element = _draggedPicture();
+    final group = element?.groupFrame;
+    if (_saving || element == null || group == null || _picX == null) return;
+    final picture = SlideRect(x: _picX!, y: _picY!, width: _picW!, height: _picH!);
+    final origin = pictureBox(element);
+    final moved = (picture.width - origin.width).abs() < 0.5 &&
+        (picture.height - origin.height).abs() < 0.5;
+    final slot = moved
+        ? movePicture(frameSlot(element), group, picture.x - origin.x, picture.y - origin.y)
+        : movePicture(slotAroundPicture(picture, element), group, 0, 0);
+    final normalized = normalizePicture(slot, group);
+    _saving = true;
+    try {
+      await widget.onResizeFrame?.call(
+        element.elementId,
+        normalized.x,
+        normalized.y,
+        normalized.width,
+        normalized.height,
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _dragPictureId = null;
+          _picX = null;
+          _picY = null;
+          _picW = null;
+          _picH = null;
+          _saving = false;
+        });
+      }
+    }
+  }
+
   Widget _text(BuildContext context, PlacedElement element) {
     final text = (element.text ?? '').trim();
     final scheme = Theme.of(context).colorScheme;
     final frame = _textFrame(element);
     final movable = element.roleId == 'note';
-    final selected = movable && element.elementId == selectedFrameId;
+    final caption = element.roleId == 'caption';
+    final selected = (movable || caption) && element.elementId == selectedFrameId;
     final box = Container(
       padding: EdgeInsets.all(6 * scale),
       decoration: BoxDecoration(
@@ -392,6 +613,25 @@ class _SlideBoardState extends State<_SlideBoard> {
         ),
       ),
     );
+    if (caption) {
+      return _positioned(
+        frame,
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            Positioned.fill(
+              child: GestureDetector(
+                onTap: () => onSelectFrame(element.elementId),
+                child: box,
+              ),
+            ),
+            if (selected && onCaptionHeight != null)
+              for (final vertical in const [-1, 1])
+                _textResizeHandle(element, 0, vertical, caption: true),
+          ],
+        ),
+      );
+    }
     if (!movable) {
       return _positioned(frame, child: box);
     }
@@ -459,7 +699,12 @@ class _SlideBoardState extends State<_SlideBoard> {
     });
   }
 
-  Widget _textResizeHandle(PlacedElement element, int horizontal, int vertical) {
+  Widget _textResizeHandle(
+    PlacedElement element,
+    int horizontal,
+    int vertical, {
+    bool caption = false,
+  }) {
     const size = 12.0;
     return Align(
       alignment: Alignment(horizontal.toDouble(), vertical.toDouble()),
@@ -469,8 +714,8 @@ class _SlideBoardState extends State<_SlideBoard> {
           behavior: HitTestBehavior.opaque,
           onPanStart: (_) => _beginTextDrag(element),
           onPanUpdate: (details) => _resizeText(details.delta, horizontal, vertical),
-          onPanEnd: (_) => _commitTextDrag(),
-          onPanCancel: _commitTextDrag,
+          onPanEnd: (_) => caption ? _commitCaptionHeight() : _commitTextDrag(),
+          onPanCancel: caption ? _commitCaptionHeight : _commitTextDrag,
           child: Container(
             width: size,
             height: size,
@@ -518,6 +763,27 @@ class _SlideBoardState extends State<_SlideBoard> {
       _textW = width;
       _textH = height;
     });
+  }
+
+  Future<void> _commitCaptionHeight() async {
+    final id = _dragTextId;
+    final height = _textH;
+    if (_saving || id == null || height == null) return;
+    _saving = true;
+    try {
+      await widget.onCaptionHeight?.call(id, height);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _dragTextId = null;
+          _textX = null;
+          _textY = null;
+          _textW = null;
+          _textH = null;
+          _saving = false;
+        });
+      }
+    }
   }
 
   Future<void> _commitTextDrag() async {
@@ -809,16 +1075,6 @@ class _SlideBoardState extends State<_SlideBoard> {
     );
   }
 
-  Widget _positionedWithin(SlideRect outer, SlideRect inner, {required Widget child}) {
-    return Positioned(
-      left: (inner.x - outer.x) * scale,
-      top: (inner.y - outer.y) * scale,
-      width: inner.width * scale,
-      height: inner.height * scale,
-      child: child,
-    );
-  }
-
   Color _hex(String? value) {
     if (value == null || value.length != 7 || !value.startsWith('#')) {
       return const Color(0xFF1F2A44);
@@ -876,6 +1132,7 @@ class _FrameInspector extends StatelessWidget {
     required this.onHeading,
     required this.onHeadingPlace,
     required this.onHeadingSize,
+    required this.onResizeFrame,
     required this.onClose,
   });
 
@@ -886,6 +1143,13 @@ class _FrameInspector extends StatelessWidget {
   final Future<void> Function(String frameId, String text)? onHeading;
   final Future<void> Function(String frameId, String place)? onHeadingPlace;
   final Future<void> Function(String frameId, double size)? onHeadingSize;
+  final Future<void> Function(
+    String frameId,
+    double x,
+    double y,
+    double width,
+    double height,
+  )? onResizeFrame;
   final VoidCallback onClose;
 
   @override
@@ -918,6 +1182,15 @@ class _FrameInspector extends StatelessWidget {
                 ),
               ],
             ),
+            if (frame.assetPath != null && frame.groupFrame != null) ...[
+              const SizedBox(height: 8),
+              _PictureSizeRow(frame: frame, onResizeFrame: onResizeFrame),
+              const SizedBox(height: 4),
+              Text(
+                'ドラッグで移動、角で拡大・縮小',
+                style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
+              ),
+            ],
             const SizedBox(height: 8),
             Text('種類', style: Theme.of(context).textTheme.labelSmall),
             const SizedBox(height: 4),
@@ -941,8 +1214,13 @@ class _FrameInspector extends StatelessWidget {
             _CommitTextField(
               fieldKey: Key('frame-heading:${frame.elementId}:${frame.text}'),
               initialValue: frame.text ?? '',
-              hint: '見出し',
+              hint: '例: {comment} {index}',
               onCommit: (value) => onHeading?.call(frame.elementId, value),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              '{page} {index} {n} {comment}',
+              style: TextStyle(fontSize: 11, color: scheme.onSurfaceVariant),
             ),
             const SizedBox(height: 8),
             DropdownButtonFormField<String>(
@@ -1028,6 +1306,83 @@ class _FrameInspector extends StatelessWidget {
   String _fileName(String path) {
     final sep = path.lastIndexOf(RegExp(r'[\\/]'));
     return sep < 0 ? path : path.substring(sep + 1);
+  }
+}
+
+class _PictureSizeRow extends StatelessWidget {
+  const _PictureSizeRow({required this.frame, required this.onResizeFrame});
+
+  final PlacedElement frame;
+  final Future<void> Function(String frameId, double x, double y, double width, double height)?
+      onResizeFrame;
+
+  @override
+  Widget build(BuildContext context) {
+    final group = frame.groupFrame;
+    return Row(
+      children: [
+        Expanded(
+          child: _SizeButton(
+            buttonKey: Key('frame-fit:${frame.elementId}'),
+            label: '合わせる',
+            onPressed: group == null || onResizeFrame == null
+                ? null
+                : () => _apply(pictureBox(frame), group),
+          ),
+        ),
+        const SizedBox(width: 4),
+        _SizeButton(
+          buttonKey: Key('frame-smaller:${frame.elementId}'),
+          label: '縮小',
+          onPressed: group == null || onResizeFrame == null
+              ? null
+              : () => _apply(scalePicture(pictureBox(frame), group, 0.87), group),
+        ),
+        const SizedBox(width: 4),
+        _SizeButton(
+          buttonKey: Key('frame-larger:${frame.elementId}'),
+          label: '拡大',
+          onPressed: group == null || onResizeFrame == null
+              ? null
+              : () => _apply(scalePicture(pictureBox(frame), group, 1.15), group),
+        ),
+      ],
+    );
+  }
+
+  void _apply(SlideRect box, SlideRect group) {
+    final slot = movePicture(slotAroundPicture(box, frame), group, 0, 0);
+    final normalized = normalizePicture(slot, group);
+    onResizeFrame?.call(
+      frame.elementId,
+      normalized.x,
+      normalized.y,
+      normalized.width,
+      normalized.height,
+    );
+  }
+}
+
+class _SizeButton extends StatelessWidget {
+  const _SizeButton({required this.buttonKey, required this.label, required this.onPressed});
+
+  final Key buttonKey;
+  final String label;
+  final VoidCallback? onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton(
+      key: buttonKey,
+      style: TextButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 6),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      ),
+      onPressed: onPressed,
+      child: Text(label),
+    );
   }
 }
 
@@ -1234,66 +1589,85 @@ class _CommitTextFieldState extends State<_CommitTextField> {
   }
 }
 
-class _PreviewBadge extends StatelessWidget {
-  const _PreviewBadge({required this.previewMode});
+class _ViolationBadge extends StatelessWidget {
+  const _ViolationBadge({
+    required this.violations,
+    required this.elements,
+    required this.color,
+    required this.onSelect,
+  });
 
-  final String previewMode;
+  final List<LayoutViolation> violations;
+  final List<PlacedElement> elements;
+  final Color color;
+  final ValueChanged<String?>? onSelect;
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    final label = previewMode == 'real'
-        ? '実データ'
-        : previewMode == 'partial'
-            ? '一部実データ'
-            : '仮プレビュー';
-    final color = previewMode == 'real' ? scheme.primary : scheme.outline;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.white,
+    return Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(999),
+      child: InkWell(
+        key: const Key('canvas-violations'),
         borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.visibility_outlined, size: 12, color: color),
-          const SizedBox(width: 4),
-          Text(label, style: TextStyle(fontSize: 11, color: color)),
-        ],
+        onTap: () => _show(context),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: color),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.warning_amber_outlined, size: 14, color: color),
+              const SizedBox(width: 4),
+              Text(
+                '${violations.length} 件の不足',
+                style: TextStyle(fontSize: 11, color: color),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
-}
 
-class _ViolationBadge extends StatelessWidget {
-  const _ViolationBadge({required this.count, required this.color});
-
-  final int count;
-  final Color color;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: color),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(Icons.warning_amber_outlined, size: 12, color: color),
-          const SizedBox(width: 4),
-          Text(
-            '$count 件の違反',
-            key: const Key('canvas-violations'),
-            style: TextStyle(fontSize: 11, color: color),
+  Future<void> _show(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: Text('${violations.length} 件の不足'),
+          content: SizedBox(
+            width: 380,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final item in violations)
+                    ListTile(
+                      key: Key('canvas-violation:${item.code}:${item.elementId}'),
+                      contentPadding: EdgeInsets.zero,
+                      leading: Icon(Icons.error_outline, color: color),
+                      title: Text(describeViolation(item, elements)),
+                      onTap: () {
+                        Navigator.of(dialogContext).pop();
+                        onSelect?.call(item.elementId);
+                      },
+                    ),
+                ],
+              ),
+            ),
           ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('閉じる'),
+            ),
+          ],
+        );
+      },
     );
   }
 }
